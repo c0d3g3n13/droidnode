@@ -187,3 +187,18 @@ impl OciRegistryBroker for OciRegistryBrokerImpl {
         Ok(resp.json::<ImageConfig>().await?)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ImageRef;
+
+    #[tokio::test]
+    async fn test_pull_alpine_manifest() {
+        let broker = OciRegistryBrokerImpl::new();
+        let image_ref = ImageRef::parse("alpine:latest").unwrap();
+        let manifest = broker.fetch_manifest(&image_ref).await.unwrap();
+        assert!(!manifest.layers.is_empty());
+        println!("layers: {}", manifest.layers.len());
+    }
+}
