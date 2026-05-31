@@ -93,11 +93,18 @@ impl ControlPlaneBroker for ControlPlaneBrokerImpl {
 
     #[instrument(skip(self, status), fields(node = %self.node_name))]
     async fn send_heartbeat(&self, status: &NodeStatus) -> Result<()> {
+        use chrono::Utc;
+
         let nodes: Api<Node> = Api::all(self.client.clone());
 
         let ready_status = if status.conditions.ready { "True" } else { "False" };
         let mem_pressure = if status.conditions.memory_pressure { "True" } else { "False" };
-        let net_avail = if status.conditions.network_available { "True" } else { "False" };
+        let net_unavail = if status.conditions.network_available { "False" } else { "True" };
+
+        // k8s node-lifecycle-controller uses lastHeartbeatTime to decide readiness.
+        // Without it (or with a stale value), the node stays NotReady regardless of
+        // the Ready condition status field.
+        let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
         let patch = json!({
             "status": {
@@ -106,25 +113,63 @@ impl ControlPlaneBroker for ControlPlaneBrokerImpl {
                         "type": "Ready",
                         "status": ready_status,
                         "reason": "DroidNodeReady",
-                        "message": "droidnode agent is running"
+                        "message": "droidnode agent is running",
+                        "lastHeartbeatTime": now,
+                        "lastTransitionTime": now
                     },
                     {
                         "type": "MemoryPressure",
                         "status": mem_pressure,
-                        "reason": "DroidNodeMemory"
+                        "reason": "DroidNodeMemory",
+                        "lastHeartbeatTime": now,
+                        "lastTransitionTime": now
                     },
                     {
                         "type": "NetworkUnavailable",
-                        "status": if net_avail == "True" { "False" } else { "True" },
-                        "reason": "DroidNodeNetwork"
+                        "status": net_unavail,
+                        "reason": "DroidNodeNetwork",
+                        "lastHeartbeatTime": now,
+                        "lastTransitionTime": now
+                    },
+                    {
+                        "type": "DiskPressure",
+                        "status": "False",
+                        "reason": "DroidNodeDisk",
+                        "lastHeartbeatTime": now,
+                        "lastTransitionTime": now
+                    },
+                    {
+                        "type": "PIDPressure",
+                        "status": "False",
+                        "reason": "DroidNodePID",
+                        "lastHeartbeatTime": now,
+                        "lastTransitionTime": now
                     }
                 ],
+                "addresses": [
+                    { "type": "Hostname", "address": &self.node_name }
+                ],
+                "nodeInfo": {
+                    "machineID": &self.node_name,
+                    "systemUUID": &self.node_name,
+                    "bootID": &self.node_name,
+                    "kernelVersion": "linux-android",
+                    "osImage": "Android (proot-oci-runner)",
+                    "containerRuntimeVersion": "proot://0.1.0",
+                    "kubeletVersion": "v1.29.0",
+                    "kubeProxyVersion": "v1.29.0",
+                    "operatingSystem": "linux",
+                    "architecture": &status.node_id
+                },
                 "allocatable": {
-                    "cpu": format!("{}", 0_u32), // reported dynamically
-                    "memory": format!("{}Ki", status.memory.available_bytes / 1024)
+                    "cpu": "1",
+                    "memory": format!("{}Ki", status.memory.available_bytes / 1024),
+                    "pods": "10"
                 },
                 "capacity": {
-                    "memory": format!("{}Ki", status.memory.total_bytes / 1024)
+                    "cpu": "1",
+                    "memory": format!("{}Ki", status.memory.total_bytes / 1024),
+                    "pods": "10"
                 }
             }
         });
