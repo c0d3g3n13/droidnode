@@ -108,7 +108,17 @@ impl WorkloadExecutionService for WorkloadExecutionServiceImpl {
             .and_then(|s| s.containers.first())
             .ok_or_else(|| DroidError::Workload("pod has no containers".into()))?;
 
-        let command = Self::resolve_command(containers, None);
+        // Load the image's ContainerConfig written by ImageOrchestrationService.
+        // This gives us ENTRYPOINT/CMD/ENV from the image when the pod spec omits them.
+        let image_config: Option<ContainerConfig> = {
+            let cfg_path = rootfs_path.join(".droidnode_image_config.json");
+            match tokio::fs::read(&cfg_path).await {
+                Ok(bytes) => serde_json::from_slice(&bytes).ok(),
+                Err(_) => None,
+            }
+        };
+
+        let command = Self::resolve_command(containers, image_config.as_ref());
         if command.is_empty() {
             return Err(DroidError::Workload(format!(
                 "pod {}: no command or entrypoint defined",
@@ -116,7 +126,7 @@ impl WorkloadExecutionService for WorkloadExecutionServiceImpl {
             )));
         }
 
-        let env = Self::resolve_env(containers, None);
+        let env = Self::resolve_env(containers, image_config.as_ref());
         let mounts = Self::resolve_mounts(containers);
 
         info!(

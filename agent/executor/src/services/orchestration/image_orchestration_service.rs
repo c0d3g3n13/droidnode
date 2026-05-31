@@ -67,7 +67,14 @@ impl ImageOrchestrationService for ImageOrchestrationServiceImpl {
             self.unpack_service.unpack_layer(digest, &rootfs).await?;
         }
 
-        // 3. Sentinel file marks this rootfs as fully prepared
+        // 3. Persist the image's ContainerConfig (entrypoint, cmd, env) so the
+        //    execution service can resolve the command without re-fetching from registry.
+        if let Some(container_config) = pulled.config.config.as_ref() {
+            let json = serde_json::to_vec(container_config)?;
+            fs::write(rootfs.join(".droidnode_image_config.json"), json).await?;
+        }
+
+        // 4. Sentinel file marks this rootfs as fully prepared
         fs::write(rootfs.join(".droidnode_ready"), b"1").await?;
         info!(rootfs = %rootfs.display(), "rootfs ready");
 
