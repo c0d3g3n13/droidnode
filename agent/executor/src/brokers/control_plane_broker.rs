@@ -238,3 +238,81 @@ impl ControlPlaneBroker for ControlPlaneBrokerImpl {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{
+        BatteryInfo, CpuInfo, MemoryInfo, NetworkInfo, NodeConditions, NodeEvent, NodeProfile,
+        NodeStatus, RuntimeInfo, StorageInfo, EventType,
+    };
+
+    fn test_profile(node_id: &str) -> NodeProfile {
+        NodeProfile {
+            node_id: node_id.into(),
+            cpu: CpuInfo { arch: "amd64".into(), cores: 4 },
+            memory: MemoryInfo { total_bytes: 8 * 1024 * 1024 * 1024, available_bytes: 4 * 1024 * 1024 * 1024 },
+            storage: StorageInfo { available_bytes: 10 * 1024 * 1024 * 1024 },
+            runtime: RuntimeInfo { name: "proot-oci-runner".into(), version: "0.1.0".into() },
+            battery: BatteryInfo { percent: 100, charging: true },
+            network: NetworkInfo { network_type: "wifi".into() },
+            conditions: NodeConditions {
+                ready: true,
+                battery_pressure: false,
+                memory_pressure: false,
+                network_available: true,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_register_heartbeat_get_pods_deregister() {
+        if std::env::var("KUBECONFIG").is_err() && !std::path::Path::new("/etc/rancher/k3s/k3s.yaml").exists() {
+            eprintln!("KUBECONFIG not set and k3s not found — skipping control plane test");
+            return;
+        }
+
+        let node_name = "droidnode-test-broker".to_string();
+        let broker = ControlPlaneBrokerImpl::new(node_name.clone()).await.unwrap();
+        let profile = test_profile(&node_name);
+
+        // Register
+        broker.register_node(&profile).await.unwrap();
+        println!("node registered: {node_name}");
+
+        // Heartbeat
+        let status = NodeStatus {
+            node_id: node_name.clone(),
+            conditions: profile.conditions.clone(),
+            memory: profile.memory.clone(),
+            storage: profile.storage.clone(),
+            battery: profile.battery.clone(),
+            network: profile.network.clone(),
+        };
+        broker.send_heartbeat(&status).await.unwrap();
+        println!("heartbeat sent");
+
+        // Assigned pods — should be empty for a fresh test node
+        let pods = broker.get_assigned_pods().await.unwrap();
+        println!("assigned pods: {}", pods.len());
+        assert!(pods.is_empty(), "expected no pods assigned to test node");
+
+        // Record an event
+        broker.record_event(&NodeEvent {
+            reason: "TestEvent".into(),
+            message: "control plane broker integration test".into(),
+            event_type: EventType::Normal,
+            pod_id: None,
+        }).await.unwrap();
+        println!("event recorded");
+
+        // Deregister
+        broker.deregister_node().await.unwrap();
+        println!("node deregistered");
+
+        // Verify gone
+        let nodes: kube::Api<Node> = kube::Api::all(broker.client.clone());
+        let result = nodes.get(&node_name).await;
+        assert!(result.is_err(), "node should be gone after deregister");
+    }
+}
