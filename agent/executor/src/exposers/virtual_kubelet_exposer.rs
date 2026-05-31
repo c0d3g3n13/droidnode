@@ -1,5 +1,3 @@
-use axum_server;
-use rcgen;
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -72,34 +70,62 @@ impl VirtualKubeletExposer {
     }
 
     /// Start the kubelet HTTPS server. This runs until the process exits.
-    /// k8s API server always connects to kubelets over HTTPS. We generate a
-    /// self-signed cert at startup; configure k3s/k8s with
-    /// --kubelet-insecure-skip-tls-verify-backend=true to trust it.
+    /// The k8s API server connects to kubelets over HTTPS. We generate a
+    /// self-signed cert at startup; configure k3s with
+    /// --kubelet-insecure-skip-tls-verify-backend=true to accept it.
     #[instrument(skip(self), fields(addr = %self.bind_addr))]
     pub async fn serve(self) -> Result<()> {
-        use axum_server::tls_rustls::RustlsConfig;
+        use hyper::service::service_fn;
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+        use hyper_util::server::conn::auto::Builder as ConnBuilder;
+        use std::sync::Arc;
+        use tokio_rustls::{rustls, TlsAcceptor};
+        use tower::ServiceExt;
 
-        let state = self.state.clone();
-        let app = build_router(state);
+        let app = build_router(self.state.clone());
 
         let cert = rcgen::generate_simple_self_signed(vec!["droidnode".to_string()])
-            .map_err(|e| crate::error::DroidError::Config(format!("TLS cert generation: {e}")))?;
+            .map_err(|e| crate::error::DroidError::Config(format!("cert: {e}")))?;
+        let cert_der = rustls::pki_types::CertificateDer::from(
+            cert.serialize_der()
+                .map_err(|e| crate::error::DroidError::Config(format!("cert der: {e}")))?,
+        );
+        let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            cert.serialize_private_key_der().into(),
+        );
+        let tls_cfg = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .map_err(|e| crate::error::DroidError::Config(format!("tls: {e}")))?;
 
-        let tls_config = RustlsConfig::from_der(
-            vec![cert.serialize_der()
-                .map_err(|e| crate::error::DroidError::Config(format!("cert serialize: {e}")))?],
-            cert.serialize_private_key_der(),
-        )
-        .await
-        .map_err(|e| crate::error::DroidError::Config(format!("TLS config: {e}")))?;
+        let acceptor = TlsAcceptor::from(Arc::new(tls_cfg));
+        let listener = tokio::net::TcpListener::bind(self.bind_addr)
+            .await
+            .map_err(crate::error::DroidError::Filesystem)?;
 
         info!(addr = %self.bind_addr, "kubelet HTTPS server listening");
-        axum_server::bind_rustls(self.bind_addr, tls_config)
-            .serve(app.into_make_service())
-            .await
-            .map_err(|e| crate::error::DroidError::Process(format!("kubelet server: {e}")))?;
 
-        Ok(())
+        loop {
+            let (tcp, _) = match listener.accept().await {
+                Ok(c) => c,
+                Err(e) => { tracing::warn!("accept error: {e}"); continue; }
+            };
+            let acceptor = acceptor.clone();
+            let app = app.clone();
+
+            tokio::spawn(async move {
+                let Ok(tls) = acceptor.accept(tcp).await else { return; };
+                let io = TokioIo::new(tls);
+                let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                    let app = app.clone();
+                    async move { app.oneshot(req.map(axum::body::Body::new)).await }
+                });
+                ConnBuilder::new(TokioExecutor::new())
+                    .serve_connection(io, svc)
+                    .await
+                    .ok();
+            });
+        }
     }
 }
 
