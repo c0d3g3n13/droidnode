@@ -2,11 +2,11 @@ use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::brokers::ProotBroker;
 use crate::error::{DroidError, Result};
-use crate::models::{HttpProbe, ProbeConfig, ProbeType};
+use crate::models::{HttpProbe, ProbeConfig};
 
 // ─── Trait ────────────────────────────────────────────────────────────────────
 

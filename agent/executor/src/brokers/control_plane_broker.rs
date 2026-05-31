@@ -194,7 +194,6 @@ impl ControlPlaneBroker for ControlPlaneBrokerImpl {
 
     #[instrument(skip(self, event), fields(node = %self.node_name))]
     async fn record_event(&self, event: &NodeEvent) -> Result<()> {
-        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
         use chrono::Utc;
 
         let events: Api<Event> = Api::namespaced(self.client.clone(), "default");

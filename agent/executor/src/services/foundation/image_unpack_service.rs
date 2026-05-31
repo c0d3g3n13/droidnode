@@ -3,7 +3,7 @@ use flate2::read::GzDecoder;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tar::Archive;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument};
 
 use crate::brokers::FilesystemBroker;
 use crate::error::Result;
@@ -29,18 +29,6 @@ impl ImageUnpackServiceImpl {
         Self { fs_broker }
     }
 
-    fn layer_tarball_path(&self, digest: &Digest) -> PathBuf {
-        // Mirrors the path chosen by ImagePullService
-        // layers_root/<digest>/layer.tar.gz
-        // We reconstruct it here — the broker owns the root, we own the naming convention.
-        // This is acceptable: services agree on the path convention through the broker's
-        // create_layer_dir return value which is deterministic for a given digest.
-        // However, to stay within The Standard we ask the broker whether the layer exists
-        // (which means the dir exists) and derive the tar path from the digest.
-        // A real implementation would expose a read_layer_bytes method on the broker;
-        // for now we derive the path and read directly to avoid bloating the broker trait.
-        PathBuf::new() // resolved at call time via digest.as_fs_name()
-    }
 }
 
 #[async_trait]

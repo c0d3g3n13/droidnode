@@ -16,8 +16,8 @@ use executor::{
             ImageUnpackServiceImpl, NodeCapabilityServiceImpl, WorkloadExecutionServiceImpl,
         },
         orchestration::{
-            ImageOrchestrationServiceImpl, NodeRegistrationServiceImpl,
-            ReconciliationServiceImpl, WorkloadLifecycleServiceImpl,
+            ImageOrchestrationServiceImpl, NodeRegistrationService, NodeRegistrationServiceImpl,
+            ReconciliationService, ReconciliationServiceImpl, WorkloadLifecycleServiceImpl,
         },
     },
 };

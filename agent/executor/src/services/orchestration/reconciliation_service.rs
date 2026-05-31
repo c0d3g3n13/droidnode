@@ -7,7 +7,7 @@ use tracing::{error, info, instrument, warn};
 
 use crate::brokers::ControlPlaneBroker;
 use crate::error::Result;
-use crate::models::{EventType, NodeEvent, PodPhase};
+use crate::models::PodPhase;
 use crate::services::foundation::event_recording_service::EventRecordingService;
 use crate::services::orchestration::{
     image_orchestration_service::ImageOrchestrationService,

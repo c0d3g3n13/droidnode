@@ -14,7 +14,6 @@ use tracing::{info, instrument};
 
 use crate::error::Result;
 use crate::models::{NodeProfile, PodRunStatus};
-use crate::services::orchestration::workload_lifecycle_service::RunningWorkload;
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
 
@@ -117,7 +116,7 @@ async fn list_pods(State(state): State<KubeletState>) -> impl IntoResponse {
 
 async fn container_logs(
     State(state): State<KubeletState>,
-    Path((namespace, pod_id, _container_name)): Path<(String, String, String)>,
+    Path((_namespace, pod_id, _container_name)): Path<(String, String, String)>,
 ) -> Response {
     // Look up by pod_uid or pod_name — for simplicity match by pod_id
     let logs = state.pod_logs.read().await;
