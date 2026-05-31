@@ -80,18 +80,15 @@ impl VirtualKubeletExposer {
         use hyper_util::server::conn::auto::Builder as ConnBuilder;
         use std::sync::Arc;
         use tokio_rustls::{rustls, TlsAcceptor};
-        use tower::ServiceExt;
 
         let app = build_router(self.state.clone());
 
-        let cert = rcgen::generate_simple_self_signed(vec!["droidnode".to_string()])
+        // rcgen 0.13 returns CertifiedKey { cert: Certificate, key_pair: KeyPair }
+        let certified = rcgen::generate_simple_self_signed(vec!["droidnode".to_string()])
             .map_err(|e| crate::error::DroidError::Config(format!("cert: {e}")))?;
-        let cert_der = rustls::pki_types::CertificateDer::from(
-            cert.serialize_der()
-                .map_err(|e| crate::error::DroidError::Config(format!("cert der: {e}")))?,
-        );
+        let cert_der = rustls::pki_types::CertificateDer::from(certified.cert.der().to_vec());
         let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-            cert.serialize_private_key_der().into(),
+            certified.key_pair.serialize_der().into(),
         );
         let tls_cfg = rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -117,8 +114,12 @@ impl VirtualKubeletExposer {
                 let Ok(tls) = acceptor.accept(tcp).await else { return; };
                 let io = TokioIo::new(tls);
                 let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                    let app = app.clone();
-                    async move { app.oneshot(req.map(axum::body::Body::new)).await }
+                    let mut app = app.clone();
+                    async move {
+                        use tower::Service;
+                        let req = req.map(axum::body::Body::new);
+                        app.call(req).await
+                    }
                 });
                 ConnBuilder::new(TokioExecutor::new())
                     .serve_connection(io, svc)
