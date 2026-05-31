@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "executor",
+    "node-agent",
+]
+resolver = "2"
