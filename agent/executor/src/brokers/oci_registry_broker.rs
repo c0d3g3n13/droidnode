@@ -78,6 +78,45 @@ impl OciRegistryBrokerImpl {
             .or(tok.access_token)
             .ok_or_else(|| DroidError::OciRegistry("token response contained no token".into()))
     }
+
+    // Fetch a manifest URL and return the raw JSON body.
+    // Handles auth transparently. Accepts both single manifests and manifest lists.
+    async fn fetch_manifest_value(&self, image_ref: &ImageRef) -> Result<serde_json::Value> {
+        let url = format!(
+            "{}/v2/{}/manifests/{}",
+            image_ref.registry_url(),
+            image_ref.repository,
+            image_ref.reference
+        );
+
+        const ACCEPT: &str = "application/vnd.oci.image.manifest.v1+json, \
+            application/vnd.docker.distribution.manifest.v2+json, \
+            application/vnd.docker.distribution.manifest.list.v2+json, \
+            application/vnd.oci.image.index.v1+json";
+
+        let resp = self.client.get(&url).header(header::ACCEPT, ACCEPT).send().await?;
+
+        let resp = if resp.status() == StatusCode::UNAUTHORIZED {
+            let token = self.resolve_token(&resp).await?;
+            self.client
+                .get(&url)
+                .header(header::ACCEPT, ACCEPT)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .send()
+                .await?
+        } else {
+            resp
+        };
+
+        if !resp.status().is_success() {
+            return Err(DroidError::ImageNotFound(format!(
+                "{}:{}",
+                image_ref.repository, image_ref.reference
+            )));
+        }
+
+        Ok(resp.json().await?)
+    }
 }
 
 fn extract_challenge_param<'a>(header: &'a str, key: &str) -> Option<String> {
@@ -92,55 +131,52 @@ fn extract_challenge_param<'a>(header: &'a str, key: &str) -> Option<String> {
 impl OciRegistryBroker for OciRegistryBrokerImpl {
     #[instrument(skip(self), fields(image = %image_ref.repository))]
     async fn fetch_manifest(&self, image_ref: &ImageRef) -> Result<Manifest> {
-        let url = format!(
-            "{}/v2/{}/manifests/{}",
-            image_ref.registry_url(),
-            image_ref.repository,
-            image_ref.reference
-        );
+        let body = self.fetch_manifest_value(image_ref).await?;
 
-        let resp = self
-            .client
-            .get(&url)
-            .header(
-                header::ACCEPT,
-                "application/vnd.oci.image.manifest.v1+json, \
-                 application/vnd.docker.distribution.manifest.v2+json",
-            )
-            .send()
-            .await?;
+        // Manifest list / OCI image index: has a "manifests" array, no "layers".
+        // Pick the best matching linux platform and fetch that specific manifest.
+        if let Some(manifests) = body.get("manifests").and_then(|m| m.as_array()) {
+            let target_arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
 
-        if resp.status() == StatusCode::UNAUTHORIZED {
-            let token = self.resolve_token(&resp).await?;
-            let resp2 = self
-                .client
-                .get(&url)
-                .header(
-                    header::ACCEPT,
-                    "application/vnd.oci.image.manifest.v1+json, \
-                     application/vnd.docker.distribution.manifest.v2+json",
-                )
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
-                .send()
-                .await?;
+            let entry = manifests
+                .iter()
+                .find(|m| {
+                    let p = m.get("platform");
+                    p.and_then(|p| p.get("os")).and_then(|v| v.as_str()) == Some("linux")
+                        && p.and_then(|p| p.get("architecture")).and_then(|v| v.as_str())
+                            == Some(target_arch)
+                })
+                .or_else(|| {
+                    manifests.iter().find(|m| {
+                        m.get("platform")
+                            .and_then(|p| p.get("os"))
+                            .and_then(|v| v.as_str())
+                            == Some("linux")
+                    })
+                })
+                .ok_or_else(|| {
+                    DroidError::OciRegistry("no linux platform found in manifest list".into())
+                })?;
 
-            if !resp2.status().is_success() {
-                return Err(DroidError::OciRegistry(format!(
-                    "manifest fetch failed: {}",
-                    resp2.status()
-                )));
-            }
-            return Ok(resp2.json::<Manifest>().await?);
+            let digest = entry
+                .get("digest")
+                .and_then(|d| d.as_str())
+                .ok_or_else(|| {
+                    DroidError::OciRegistry("manifest list entry has no digest".into())
+                })?;
+
+            debug!(%digest, arch = target_arch, "resolved manifest list to platform manifest");
+
+            let platform_ref = ImageRef {
+                registry: image_ref.registry.clone(),
+                repository: image_ref.repository.clone(),
+                reference: digest.to_string(),
+            };
+            let platform_body = self.fetch_manifest_value(&platform_ref).await?;
+            return serde_json::from_value(platform_body).map_err(DroidError::Json);
         }
 
-        if !resp.status().is_success() {
-            return Err(DroidError::ImageNotFound(format!(
-                "{}:{}",
-                image_ref.repository, image_ref.reference
-            )));
-        }
-
-        Ok(resp.json::<Manifest>().await?)
+        serde_json::from_value(body).map_err(DroidError::Json)
     }
 
     #[instrument(skip(self), fields(digest = %digest))]
