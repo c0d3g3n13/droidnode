@@ -299,6 +299,7 @@ mod tests {
 
         // Record an event
         broker.record_event(&NodeEvent {
+            node_id: node_name.clone(),
             reason: "TestEvent".into(),
             message: "control plane broker integration test".into(),
             event_type: EventType::Normal,
