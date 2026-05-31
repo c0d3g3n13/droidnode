@@ -159,7 +159,7 @@ impl ControlPlaneBroker for ControlPlaneBrokerImpl {
                     "kubeletVersion": "v1.29.0",
                     "kubeProxyVersion": "v1.29.0",
                     "operatingSystem": "linux",
-                    "architecture": &status.node_id
+                    "architecture": if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" }
                 },
                 "allocatable": {
                     "cpu": "1",

@@ -1,0 +1,49 @@
+---
+# ServiceAccount the node-agent authenticates as.
+# On Android, the kubeconfig will reference this account's token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: droidnode-agent
+  namespace: kube-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: droidnode-agent
+rules:
+  # Node lifecycle — register, update status, deregister
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["get", "update", "patch"]
+
+  # Pod scheduling — read pods assigned to this node
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get", "update", "patch"]
+
+  # Events — record workload lifecycle events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: droidnode-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: droidnode-agent
+subjects:
+  - kind: ServiceAccount
+    name: droidnode-agent
+    namespace: kube-system
