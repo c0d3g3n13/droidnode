@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tar::Archive;
 use tracing::{debug, info, instrument};
