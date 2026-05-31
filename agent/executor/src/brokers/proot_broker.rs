@@ -140,14 +140,25 @@ mod tests {
         let rootfs = prepare_alpine(&tmp).await;
 
         let broker = ProotBrokerImpl::new(proot_path);
-        let cmd = vec!["echo".to_string(), "hello from proot".to_string()];
-        let mut child = broker.execute(&rootfs, &cmd, &[], &[]).await.unwrap();
+        // Use full path + shell to avoid PATH resolution issues inside the guest rootfs.
+        let cmd = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo hello from proot".to_string(),
+        ];
+        let child = broker.execute(&rootfs, &cmd, &[], &[]).await.unwrap();
 
         let output = child.wait_with_output().await.unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
 
         println!("stdout: {stdout}");
-        assert!(output.status.success(), "proot exited with {:?}", output.status.code());
+        println!("stderr: {stderr}");
+        assert!(
+            output.status.success(),
+            "proot exited with {:?}\nstderr: {stderr}",
+            output.status.code()
+        );
         assert!(stdout.contains("hello from proot"), "unexpected stdout: {stdout}");
 
         let _ = std::fs::remove_dir_all(&tmp);
