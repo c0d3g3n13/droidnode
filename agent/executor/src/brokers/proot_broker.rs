@@ -50,6 +50,10 @@ impl ProotBroker for ProotBrokerImpl {
 
         let mut cmd = Command::new(&self.proot_path);
 
+        // Disable proot's seccomp acceleration — conflicts with host and Android kernel
+        // seccomp filters. Pure ptrace mode is slower but works everywhere.
+        cmd.env("PROOT_NO_SECCOMP", "1");
+
         // Root filesystem
         cmd.args(["-r", rootfs.to_str().unwrap_or("/")]);
 
