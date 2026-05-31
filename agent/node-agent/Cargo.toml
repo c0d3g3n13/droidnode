@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 executor = { path = "../executor" }
+k8s-openapi = { version = "0.21", features = ["v1_29"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
