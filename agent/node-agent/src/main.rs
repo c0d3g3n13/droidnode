@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     let proot_broker = Arc::new(ProotBrokerImpl::new(config.proot_path.clone()));
 
     let cp_broker = Arc::new(
-        ControlPlaneBrokerImpl::new(config.node_id.clone())
+        ControlPlaneBrokerImpl::new(config.node_id.clone(), config.kubelet_addr.port())
             .await
             .context("failed to create k8s client — is KUBECONFIG set?")?,
     );

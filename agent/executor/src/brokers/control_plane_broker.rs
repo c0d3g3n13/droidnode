@@ -25,14 +25,23 @@ pub trait ControlPlaneBroker: Send + Sync {
 pub struct ControlPlaneBrokerImpl {
     client: Client,
     node_name: String,
+    kubelet_port: u16,
 }
 
 impl ControlPlaneBrokerImpl {
-    pub async fn new(node_name: String) -> Result<Self> {
+    pub async fn new(node_name: String, kubelet_port: u16) -> Result<Self> {
         let client = Client::try_default()
             .await
             .map_err(DroidError::KubeApi)?;
-        Ok(Self { client, node_name })
+        Ok(Self { client, node_name, kubelet_port })
+    }
+
+    fn local_ip() -> String {
+        // UDP connect trick: connect without sending to discover the outbound interface IP.
+        std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|s| { s.connect("8.8.8.8:80")?; s.local_addr() })
+            .map(|a| a.ip().to_string())
+            .unwrap_or_else(|_| "127.0.0.1".to_string())
     }
 
     /// Build a Node object from our capability profile.
@@ -147,8 +156,12 @@ impl ControlPlaneBroker for ControlPlaneBrokerImpl {
                     }
                 ],
                 "addresses": [
-                    { "type": "Hostname", "address": &self.node_name }
+                    { "type": "InternalIP", "address": Self::local_ip() },
+                    { "type": "Hostname",   "address": &self.node_name }
                 ],
+                "daemonEndpoints": {
+                    "kubeletEndpoint": { "Port": self.kubelet_port }
+                },
                 "nodeInfo": {
                     "machineID": &self.node_name,
                     "systemUUID": &self.node_name,
@@ -318,7 +331,7 @@ mod tests {
         }
 
         let node_name = "droidnode-test-broker".to_string();
-        let broker = ControlPlaneBrokerImpl::new(node_name.clone()).await.unwrap();
+        let broker = ControlPlaneBrokerImpl::new(node_name.clone(), 10255).await.unwrap();
         let profile = test_profile(&node_name);
 
         // Register
