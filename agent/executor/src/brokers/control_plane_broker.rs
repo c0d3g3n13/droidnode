@@ -243,9 +243,15 @@ impl ControlPlaneBroker for ControlPlaneBrokerImpl {
             }
         });
 
-        pods.patch_status(pod_name, &PatchParams::apply("droidnode"), &Patch::Merge(&patch))
-            .await
-            .map_err(DroidError::KubeApi)?;
+        match pods.patch_status(pod_name, &PatchParams::apply("droidnode"), &Patch::Merge(&patch)).await {
+            Ok(_) => {}
+            // Pod already in a terminal state — k8s forbids transitioning back to non-terminal.
+            // This is fine: the pod ran and completed, our status is stale. Ignore.
+            Err(kube::Error::Api(ref e)) if e.code == 422 && e.message.contains("non-terminated") => {
+                debug!(pod = %pod_name, "pod already terminal, skipping status patch");
+            }
+            Err(e) => return Err(DroidError::KubeApi(e)),
+        }
 
         Ok(())
     }

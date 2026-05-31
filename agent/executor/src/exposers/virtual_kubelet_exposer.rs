@@ -1,3 +1,5 @@
+use axum_server;
+use rcgen;
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -69,18 +71,31 @@ impl VirtualKubeletExposer {
         self.state.clone()
     }
 
-    /// Start the kubelet HTTP server. This runs until the process exits.
+    /// Start the kubelet HTTPS server. This runs until the process exits.
+    /// k8s API server always connects to kubelets over HTTPS. We generate a
+    /// self-signed cert at startup; configure k3s/k8s with
+    /// --kubelet-insecure-skip-tls-verify-backend=true to trust it.
     #[instrument(skip(self), fields(addr = %self.bind_addr))]
     pub async fn serve(self) -> Result<()> {
+        use axum_server::tls_rustls::RustlsConfig;
+
         let state = self.state.clone();
         let app = build_router(state);
 
-        let listener = tokio::net::TcpListener::bind(self.bind_addr)
-            .await
-            .map_err(crate::error::DroidError::Filesystem)?; // IO error
+        let cert = rcgen::generate_simple_self_signed(vec!["droidnode".to_string()])
+            .map_err(|e| crate::error::DroidError::Config(format!("TLS cert generation: {e}")))?;
 
-        info!(addr = %self.bind_addr, "kubelet HTTP server listening");
-        axum::serve(listener, app)
+        let tls_config = RustlsConfig::from_der(
+            vec![cert.serialize_der()
+                .map_err(|e| crate::error::DroidError::Config(format!("cert serialize: {e}")))?],
+            cert.serialize_private_key_der(),
+        )
+        .await
+        .map_err(|e| crate::error::DroidError::Config(format!("TLS config: {e}")))?;
+
+        info!(addr = %self.bind_addr, "kubelet HTTPS server listening");
+        axum_server::bind_rustls(self.bind_addr, tls_config)
+            .serve(app.into_make_service())
             .await
             .map_err(|e| crate::error::DroidError::Process(format!("kubelet server: {e}")))?;
 
