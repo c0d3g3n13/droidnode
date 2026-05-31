@@ -74,3 +74,49 @@ impl ImageOrchestrationService for ImageOrchestrationServiceImpl {
         Ok(rootfs)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::brokers::{FilesystemBroker, FilesystemBrokerImpl, OciRegistryBroker, OciRegistryBrokerImpl};
+    use crate::services::foundation::{
+        image_pull_service::{ImagePullService, ImagePullServiceImpl},
+        image_unpack_service::{ImageUnpackService, ImageUnpackServiceImpl},
+    };
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_prepare_alpine_rootfs() {
+        let tmp = std::env::temp_dir().join("droidnode_orch_test");
+        let layers_dir = tmp.join("layers");
+        let rootfs_dir = tmp.join("rootfs");
+
+        let oci = Arc::new(OciRegistryBrokerImpl::new());
+        let fs = Arc::new(FilesystemBrokerImpl::new(layers_dir));
+
+        let pull = Arc::new(ImagePullServiceImpl::new(
+            Arc::clone(&oci) as Arc<dyn OciRegistryBroker>,
+            Arc::clone(&fs) as Arc<dyn FilesystemBroker>,
+        ));
+        let unpack = Arc::new(ImageUnpackServiceImpl::new(
+            Arc::clone(&fs) as Arc<dyn FilesystemBroker>,
+        ));
+
+        let svc = ImageOrchestrationServiceImpl::new(
+            pull as Arc<dyn ImagePullService>,
+            unpack as Arc<dyn ImageUnpackService>,
+            rootfs_dir.clone(),
+        );
+
+        let image_ref = crate::models::ImageRef::parse("alpine:latest").unwrap();
+        let rootfs = svc.prepare_image(&image_ref).await.unwrap();
+
+        assert!(rootfs.join(".droidnode_ready").exists(), "sentinel missing");
+        assert!(rootfs.join("bin").exists(), "rootfs /bin missing");
+        assert!(rootfs.join("etc").exists(), "rootfs /etc missing");
+
+        println!("rootfs at: {}", rootfs.display());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}

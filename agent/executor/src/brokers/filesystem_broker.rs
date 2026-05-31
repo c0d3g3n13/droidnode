@@ -93,6 +93,40 @@ fn available_space(path: &Path) -> Result<u64> {
 
 #[cfg(not(target_os = "linux"))]
 fn available_space(_path: &Path) -> Result<u64> {
-    // Stub for non-Linux development builds
     Ok(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Digest;
+
+    #[tokio::test]
+    async fn test_create_write_exists_remove() {
+        let tmp = std::env::temp_dir().join("droidnode_fs_test");
+        let broker = FilesystemBrokerImpl::new(tmp.clone());
+        let digest = Digest(
+            "sha256:deadbeef00000000000000000000000000000000000000000000000000000000".into(),
+        );
+
+        let dir = broker.create_layer_dir(&digest).await.unwrap();
+        assert!(dir.exists());
+
+        let tar_path = dir.join("layer.tar.gz");
+        broker
+            .write_layer(&tar_path, bytes::Bytes::from(b"test data".as_ref()))
+            .await
+            .unwrap();
+        assert!(tar_path.exists());
+
+        assert!(broker.layer_exists(&digest).await.unwrap());
+
+        let free = broker.available_bytes().await.unwrap();
+        assert!(free > 0);
+
+        broker.remove_layer(&digest).await.unwrap();
+        assert!(!broker.layer_exists(&digest).await.unwrap());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
