@@ -127,71 +127,96 @@ impl VirtualKubeletExposer {
 
 /// Build a rustls ServerConfig for the kubelet HTTPS endpoint.
 ///
-/// Prefers signing the cert with the k3s cluster CA so the API server trusts it
-/// without any k3s configuration changes. Falls back to a self-signed cert when
-/// the CA files are not present (e.g. vanilla k8s or Android; in that case you
-/// must configure the API server to trust or skip the cert).
+/// Generates a persistent CA on first run and saves it to
+/// `$DROIDNODE_DATA_DIR/kubelet-ca.{crt,key}` (default: ~/.droidnode/).
+/// The kubelet serving cert is signed by that CA on every startup.
 ///
-/// CA paths can be overridden via DROIDNODE_CA_CERT / DROIDNODE_CA_KEY env vars.
+/// On first run the agent prints the CA cert path; add it to k3s once:
+///   kube-apiserver-arg:
+///     - "kubelet-certificate-authority=<path>"
+/// After that one restart k3s trusts every cert we sign.
 fn make_tls_config(local_ip: &str) -> Result<tokio_rustls::rustls::ServerConfig> {
-    use rcgen::{CertificateParams, KeyPair};
+    use base64::Engine;
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
     use tokio_rustls::rustls;
 
-    // SANs: DNS hostname + actual IP the API server will dial
-    let sans = vec!["droidnode".to_string(), local_ip.to_string()];
+    // Resolve data dir (same logic as Config::from_env in main.rs)
+    let data_dir = std::env::var("DROIDNODE_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+                .join(".droidnode")
+        });
+    let _ = std::fs::create_dir_all(&data_dir);
 
-    let ca_cert_path = std::env::var("DROIDNODE_CA_CERT")
-        .unwrap_or_else(|_| "/var/lib/rancher/k3s/server/tls/server-ca.crt".into());
-    let ca_key_path = std::env::var("DROIDNODE_CA_KEY")
-        .unwrap_or_else(|_| "/var/lib/rancher/k3s/server/tls/server-ca.key".into());
+    let ca_cert_path = data_dir.join("kubelet-ca.crt");
+    let ca_key_path = data_dir.join("kubelet-ca.key");
 
-    if let (Ok(ca_cert_pem), Ok(ca_key_pem)) = (
-        std::fs::read_to_string(&ca_cert_path),
-        std::fs::read_to_string(&ca_key_path),
-    ) {
-        let ca_key = KeyPair::from_pem(&ca_key_pem)
-            .map_err(|e| crate::error::DroidError::Config(format!("CA key: {e}")))?;
-        let ca_params = CertificateParams::from_ca_cert_pem(&ca_cert_pem)
-            .map_err(|e| crate::error::DroidError::Config(format!("CA cert: {e}")))?;
-        // Reconstruct the CA Certificate object so rcgen can use it as issuer.
-        // The API server verifies our cert against its copy of the CA cert; using
-        // the same key is what matters, not the reconstructed CA cert's metadata.
-        let ca_cert_obj = ca_params
-            .self_signed(&ca_key)
-            .map_err(|e| crate::error::DroidError::Config(format!("CA self-sign: {e}")))?;
+    // CA params are identical every run — same Subject DN → same Issuer field
+    // in every cert we sign → k3s can match against the persisted CA cert.
+    let mut ca_params = CertificateParams::default();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
 
-        let params = CertificateParams::new(sans.clone())
-            .map_err(|e| crate::error::DroidError::Config(format!("cert params: {e}")))?;
-        let key = KeyPair::generate()
-            .map_err(|e| crate::error::DroidError::Config(format!("key gen: {e}")))?;
-        let signed = params
-            .signed_by(&key, &ca_cert_obj.cert, &ca_key)
-            .map_err(|e| crate::error::DroidError::Config(format!("sign: {e}")))?;
+    // Load or generate the CA key (persisted across restarts so the public key
+    // stored in kubelet-ca.crt never changes after the first run).
+    let ca_key = if ca_key_path.exists() {
+        let pem = std::fs::read_to_string(&ca_key_path)
+            .map_err(|e| crate::error::DroidError::Config(format!("CA key read: {e}")))?;
+        KeyPair::from_pem(&pem)
+            .map_err(|e| crate::error::DroidError::Config(format!("CA key parse: {e}")))?
+    } else {
+        KeyPair::generate()
+            .map_err(|e| crate::error::DroidError::Config(format!("CA key gen: {e}")))?
+    };
 
-        let cert_der =
-            rustls::pki_types::CertificateDer::from(signed.cert.der().to_vec());
-        let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-            signed.key_pair.serialize_der().into(),
+    // Derive (or re-derive) the CA Certificate object from the stable params+key.
+    // rcgen 0.13: self_signed / signed_by return Certificate (not CertifiedKey).
+    let ca_cert = ca_params
+        .self_signed(&ca_key)
+        .map_err(|e| crate::error::DroidError::Config(format!("CA self-sign: {e}")))?;
+
+    // Persist on first run only
+    if !ca_key_path.exists() {
+        std::fs::write(&ca_key_path, ca_key.serialize_pem())
+            .map_err(|e| crate::error::DroidError::Config(format!("CA key write: {e}")))?;
+    }
+    if !ca_cert_path.exists() {
+        let pem = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            base64::engine::general_purpose::STANDARD.encode(ca_cert.der())
         );
-
-        tracing::info!(ca = %ca_cert_path, ip = %local_ip, "kubelet cert signed by k3s CA");
-        return rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der], key_der)
-            .map_err(|e| crate::error::DroidError::Config(format!("tls: {e}")));
+        std::fs::write(&ca_cert_path, &pem)
+            .map_err(|e| crate::error::DroidError::Config(format!("CA cert write: {e}")))?;
+        tracing::warn!(
+            "kubelet CA written to {path}. One-time k3s setup:\n  \
+            Add to /etc/rancher/k3s/config.yaml:\n    \
+            kube-apiserver-arg:\n      \
+            - \"kubelet-certificate-authority={path}\"\n  \
+            Then: sudo systemctl restart k3s",
+            path = ca_cert_path.display()
+        );
     }
 
-    tracing::warn!(
-        ca = %ca_cert_path,
-        "k3s CA not found — using self-signed cert (set DROIDNODE_CA_CERT/KEY to fix kubectl logs)"
-    );
-    let certified = rcgen::generate_simple_self_signed(sans)
-        .map_err(|e| crate::error::DroidError::Config(format!("cert: {e}")))?;
-    let cert_der =
-        rustls::pki_types::CertificateDer::from(certified.cert.der().to_vec());
-    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        certified.key_pair.serialize_der().into(),
-    );
+    // Sign the kubelet serving cert with our CA.
+    // The IP must be a SAN — k3s connects to the InternalIP we advertise.
+    let server_params =
+        CertificateParams::new(vec!["droidnode".to_string(), local_ip.to_string()])
+            .map_err(|e| crate::error::DroidError::Config(format!("cert params: {e}")))?;
+    let server_key = KeyPair::generate()
+        .map_err(|e| crate::error::DroidError::Config(format!("server key gen: {e}")))?;
+    let signed = server_params
+        .signed_by(&server_key, &ca_cert, &ca_key)
+        .map_err(|e| crate::error::DroidError::Config(format!("sign: {e}")))?;
+
+    // rcgen 0.13: signed is Certificate; key stays as the separate KeyPair.
+    let cert_der = rustls::pki_types::CertificateDer::from(signed.der().to_vec());
+    let key_der =
+        rustls::pki_types::PrivateKeyDer::Pkcs8(server_key.serialize_der().into());
+
+    tracing::info!(ip = %local_ip, ca = %ca_cert_path.display(), "kubelet TLS ready");
+
     rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert_der], key_der)
