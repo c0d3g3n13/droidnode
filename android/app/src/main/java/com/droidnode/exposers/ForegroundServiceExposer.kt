@@ -53,8 +53,16 @@ class ForegroundServiceExposer : Service() {
 
         val batteryBroker = BatteryBroker(this)
 
-        val agentBinary = extractAsset("node-agent")
-        extractAsset("proot") // proot is read by the Rust agent at DROIDNODE_PROOT_PATH
+        // Binaries are packaged as .so files in jniLibs/arm64-v8a/ so the
+        // package manager extracts them to nativeLibraryDir with execute permission.
+        // filesDir is mounted noexec on API 29+ so we cannot execute from there.
+        val nativeDir = applicationInfo.nativeLibraryDir
+        val agentBinary = File(nativeDir, "libnode_agent.so")
+        val prootBinary = File(nativeDir, "libproot.so")
+
+        if (!agentBinary.exists()) {
+            Log.e(TAG, "node-agent binary not found at ${agentBinary.absolutePath} — APK may be missing jniLibs")
+        }
 
         val dataDir = filesDir
         val nodeId = "droidnode-${deviceFingerprint()}"
@@ -62,7 +70,9 @@ class ForegroundServiceExposer : Service() {
 
         val processBroker = RustProcessBroker(
             binaryPath = agentBinary,
+            prootPath = prootBinary,
             dataDir = dataDir,
+            cacheDir = cacheDir,
             kubeConfigPath = kubeConfig,
             nodeId = nodeId,
         )
@@ -117,25 +127,6 @@ class ForegroundServiceExposer : Service() {
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(true)
             .build()
-
-    // ─── Asset extraction ────────────────────────────────────────────────────
-
-    /**
-     * Copy a named binary from APK assets to internal storage on first run.
-     * Returns the extracted executable File.
-     */
-    private fun extractAsset(name: String): File {
-        val destFile = File(filesDir, name)
-        if (!destFile.exists()) {
-            Log.i(TAG, "extracting $name from assets")
-            assets.open(name).use { input ->
-                destFile.outputStream().use { output -> input.copyTo(output) }
-            }
-            destFile.setExecutable(true)
-            Log.i(TAG, "$name extracted to ${destFile.absolutePath}")
-        }
-        return destFile
-    }
 
     private fun deviceFingerprint(): String {
         return android.provider.Settings.Secure.getString(
