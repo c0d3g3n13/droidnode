@@ -63,7 +63,13 @@ echo "Building node-agent for aarch64-linux-android..."
 
 cd "$REPO_ROOT/agent"
 
+# cc-rs (used by ring and other C dependencies) resolves the compiler via
+# CC_<target-underscored>.  The linker env var alone is not enough.
 CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CLANG" \
+CC_aarch64_linux_android="$CLANG" \
+CXX_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android35-clang++" \
+AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar" \
+RANLIB_aarch64_linux_android="$TOOLCHAIN/llvm-ranlib" \
     cargo build --release -p node-agent --target aarch64-linux-android
 
 # ── Copy binary to jniLibs ───────────────────────────────────────────────────
