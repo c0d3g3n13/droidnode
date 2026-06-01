@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 use tracing::{info, instrument, warn};
 
 use crate::error::{DroidError, Result};
+use crate::exposers::virtual_kubelet_exposer::KubeletState;
 use crate::models::{ContainerRunStatus, Pod, PodPhase, PodRunStatus, ProbeConfig};
 use crate::services::foundation::{
     health_probe_service::HealthProbeService,
@@ -42,14 +43,16 @@ pub trait WorkloadLifecycleService: Send + Sync {
 pub struct WorkloadLifecycleServiceImpl {
     execution_service: Arc<dyn WorkloadExecutionService>,
     probe_service: Arc<dyn HealthProbeService>,
+    kubelet_state: KubeletState,
 }
 
 impl WorkloadLifecycleServiceImpl {
     pub fn new(
         execution_service: Arc<dyn WorkloadExecutionService>,
         probe_service: Arc<dyn HealthProbeService>,
+        kubelet_state: KubeletState,
     ) -> Self {
-        Self { execution_service, probe_service }
+        Self { execution_service, probe_service, kubelet_state }
     }
 }
 
@@ -70,7 +73,34 @@ impl WorkloadLifecycleService for WorkloadLifecycleServiceImpl {
             .map(|c| c.name.clone())
             .unwrap_or_else(|| "container".into());
 
-        let child = self.execution_service.execute_workload(pod, &rootfs).await?;
+        let mut child = self.execution_service.execute_workload(pod, &rootfs).await?;
+
+        // Spawn tasks to drain stdout/stderr into the kubelet log ring buffer.
+        // The buffer is keyed by pod name — that's what the /containerLogs URL
+        // path supplies, so kubectl logs can look it up directly.
+        if let Some(stdout) = child.stdout.take() {
+            let state = self.kubelet_state.clone();
+            let name = pod_name.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    state.append_log(&name, line).await;
+                }
+            });
+        }
+        if let Some(stderr) = child.stderr.take() {
+            let state = self.kubelet_state.clone();
+            let name = pod_name.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    state.append_log(&name, line).await;
+                }
+            });
+        }
+
         info!(pod = %pod_name, "workload started");
 
         Ok(Arc::new(RunningWorkload {

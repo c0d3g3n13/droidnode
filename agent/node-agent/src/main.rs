@@ -88,10 +88,16 @@ async fn main() -> anyhow::Result<()> {
         config.rootfs_base.clone(),
     ));
 
+    // ─── Exposer (created early so its state can be shared with the lifecycle service) ───
+
+    let exposer = VirtualKubeletExposer::new(config.kubelet_addr);
+    let kubelet_state = exposer.state();
+
     let workload_lifecycle = Arc::new(WorkloadLifecycleServiceImpl::new(
         Arc::clone(&execution_service)
             as Arc<dyn executor::services::foundation::WorkloadExecutionService>,
         Arc::clone(&probe_service) as Arc<dyn executor::services::foundation::HealthProbeService>,
+        kubelet_state,
     ));
 
     let reconciler = Arc::new(ReconciliationServiceImpl::new(
@@ -110,10 +116,6 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&capability_service)
             as Arc<dyn executor::services::foundation::NodeCapabilityService>,
     ));
-
-    // ─── Exposer ──────────────────────────────────────────────────────────────
-
-    let exposer = VirtualKubeletExposer::new(config.kubelet_addr);
 
     // ─── Launch all tasks ────────────────────────────────────────────────────
 

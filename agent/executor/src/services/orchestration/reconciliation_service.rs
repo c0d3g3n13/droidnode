@@ -84,6 +84,18 @@ impl ReconciliationServiceImpl {
                 continue;
             }
 
+            // Skip pods already in a terminal phase (Succeeded/Failed).
+            // k8s keeps restartPolicy:Never pods after completion; without this
+            // check the reconciler would re-execute them every 15 s.
+            let k8s_phase = pod
+                .status
+                .as_ref()
+                .and_then(|s| s.phase.as_deref())
+                .unwrap_or("");
+            if k8s_phase == "Succeeded" || k8s_phase == "Failed" {
+                continue;
+            }
+
             // New pod: pull image and start
             let image_name = pod
                 .spec
