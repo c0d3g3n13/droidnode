@@ -80,24 +80,42 @@ echo "✓ node-agent → $JNILIBS/libnode_agent.so"
 
 # ── proot ────────────────────────────────────────────────────────────────────
 
-if [ ! -f "$JNILIBS/libproot.so" ]; then
+if [ ! -f "$JNILIBS/libproot.so" ] || [ ! -f "$JNILIBS/libtalloc2.so" ]; then
     echo ""
-    echo "Downloading proot-static for Android ARM64..."
-    # Use proot-static (statically linked) — the regular proot package requires
-    # libtalloc.so.2 which is a Termux-only library not present on stock Android.
-    PROOT_DEB="/tmp/proot-static-android.deb"
+    echo "Downloading proot + libtalloc for Android ARM64..."
+
+    command -v patchelf >/dev/null 2>&1 || { echo "ERROR: patchelf not found. Run: sudo apt install patchelf"; exit 1; }
+
+    WORK=/tmp/proot-android-work
+    rm -rf "$WORK" && mkdir -p "$WORK"
+
+    # Download Termux proot (dynamically linked against libtalloc.so.2)
     wget -q --show-progress \
-        "https://packages.termux.dev/apt/termux-main/pool/main/p/proot-static/proot-static_5.4.0_aarch64.deb" \
-        -O "$PROOT_DEB"
-    dpkg -x "$PROOT_DEB" /tmp/proot-static-pkg
-    PROOT_BIN=$(find /tmp/proot-static-pkg -type f -name "proot*" | head -1)
-    if [ -z "$PROOT_BIN" ]; then
-        echo "ERROR: could not find proot binary in package"
-        exit 1
-    fi
-    cp "$PROOT_BIN" "$JNILIBS/libproot.so"
-    rm -rf /tmp/proot-static-pkg "$PROOT_DEB"
-    echo "✓ proot-static → $JNILIBS/libproot.so"
+        "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.4.0_aarch64.deb" \
+        -O "$WORK/proot.deb"
+    dpkg -x "$WORK/proot.deb" "$WORK/proot-pkg"
+    PROOT_BIN=$(find "$WORK/proot-pkg" -type f -name "proot" | head -1)
+
+    # Download matching libtalloc
+    wget -q --show-progress \
+        "https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.1_aarch64.deb" \
+        -O "$WORK/libtalloc.deb" 2>/dev/null || \
+    wget -q --show-progress \
+        "https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.0_aarch64.deb" \
+        -O "$WORK/libtalloc.deb"
+    dpkg -x "$WORK/libtalloc.deb" "$WORK/talloc-pkg"
+    TALLOC_LIB=$(find "$WORK/talloc-pkg" -name "libtalloc.so*" -type f | head -1)
+
+    # Patch proot: rename NEEDED libtalloc.so.2 → libtalloc2.so (valid Android .so name)
+    # and set RPATH=$ORIGIN so the linker finds it next to libproot.so in nativeLibraryDir.
+    cp "$PROOT_BIN" "$WORK/proot-patched"
+    patchelf --replace-needed libtalloc.so.2 libtalloc2.so "$WORK/proot-patched"
+    patchelf --set-rpath '$ORIGIN' "$WORK/proot-patched"
+
+    cp "$WORK/proot-patched" "$JNILIBS/libproot.so"
+    cp "$TALLOC_LIB"         "$JNILIBS/libtalloc2.so"
+    rm -rf "$WORK"
+    echo "✓ libproot.so + libtalloc2.so → $JNILIBS/"
 fi
 
 # ── Build APK ────────────────────────────────────────────────────────────────

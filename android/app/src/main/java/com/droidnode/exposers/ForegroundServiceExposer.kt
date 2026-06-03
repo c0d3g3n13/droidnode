@@ -73,6 +73,7 @@ class ForegroundServiceExposer : Service() {
             prootPath = prootBinary,
             dataDir = dataDir,
             cacheDir = cacheDir,
+            nativeLibDir = nativeDir,
             kubeConfigPath = kubeConfig,
             nodeId = nodeId,
         )

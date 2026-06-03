@@ -19,6 +19,7 @@ class RustProcessBroker(
     private val prootPath: File,
     private val dataDir: File,
     private val cacheDir: File,
+    private val nativeLibDir: String,
     private val kubeConfigPath: File,
     private val nodeId: String,
     private val kubeletPort: Int = 10255,
@@ -50,6 +51,9 @@ class RustProcessBroker(
                     // Runtime dirs — Rust stdlib and proot child processes need these
                     put("HOME", dataDir.absolutePath)
                     put("TMPDIR", cacheDir.absolutePath)
+                    // proot is patched to look for libtalloc2.so via $ORIGIN RPATH,
+                    // but set LD_LIBRARY_PATH as a fallback for the dynamic linker.
+                    put("LD_LIBRARY_PATH", nativeLibDir)
                     // Logging
                     put("RUST_LOG", "info")
                 }
