@@ -112,6 +112,12 @@ if [ ! -f "$JNILIBS/libproot.so" ] || [ ! -f "$JNILIBS/libtalloc2.so" ]; then
     cp "$WORK/proot-patched" "$JNILIBS/libproot.so"
     cp "$TALLOC_LIB"         "$JNILIBS/libtalloc2.so"
     rm -rf "$WORK"
+
+    # Verify the NEEDED entry was actually renamed
+    if readelf -d "$JNILIBS/libproot.so" | grep -q "libtalloc.so.2"; then
+        echo "ERROR: patchelf did not rename the NEEDED entry — libproot.so still requires libtalloc.so.2"
+        exit 1
+    fi
     echo "✓ libproot.so + libtalloc2.so → $JNILIBS/"
 fi
 
