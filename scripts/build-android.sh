@@ -91,7 +91,7 @@ if [ ! -f "$JNILIBS/libproot.so" ] || [ ! -f "$JNILIBS/libtalloc2.so" ]; then
 
     # Download Termux proot (dynamically linked against libtalloc.so.2)
     wget -q --show-progress \
-        "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.4.0_aarch64.deb" \
+        "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.76_aarch64.deb" \
         -O "$WORK/proot.deb"
     dpkg -x "$WORK/proot.deb" "$WORK/proot-pkg"
     PROOT_BIN=$(find "$WORK/proot-pkg" -type f -name "proot" | head -1)
