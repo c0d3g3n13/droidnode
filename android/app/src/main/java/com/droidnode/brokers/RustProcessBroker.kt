@@ -34,7 +34,7 @@ class RustProcessBroker(
 
         val pb = ProcessBuilder(binaryPath.absolutePath)
             .directory(dataDir)
-            .redirectErrorStream(false)
+            .redirectErrorStream(true)   // merge stderr into stdout so we capture all output
             .apply {
                 environment().apply {
                     // Identity

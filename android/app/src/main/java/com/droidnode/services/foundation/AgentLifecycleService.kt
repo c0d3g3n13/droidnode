@@ -24,6 +24,18 @@ class AgentLifecycleService(private val processBroker: RustProcessBroker) {
         val proc = processBroker.spawn()
         agentProcess = proc
         Log.i(TAG, "agent started")
+
+        // Drain combined stdout+stderr to logcat so crash messages are visible.
+        Thread {
+            try {
+                proc.inputStream.bufferedReader().forEachLine { line ->
+                    Log.i("DroidNodeRust", line)
+                }
+            } catch (_: Exception) {}
+            val code = try { proc.exitValue() } catch (_: Exception) { -1 }
+            Log.w(TAG, "agent process ended, exit code=$code")
+        }.also { it.isDaemon = true; it.name = "agent-log-reader" }.start()
+
         proc
     }
 
