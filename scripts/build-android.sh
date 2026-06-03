@@ -82,16 +82,22 @@ echo "✓ node-agent → $JNILIBS/libnode_agent.so"
 
 if [ ! -f "$JNILIBS/libproot.so" ]; then
     echo ""
-    echo "NOTE: proot binary not found at $JNILIBS/libproot.so"
-    echo "To obtain a proot binary for Android ARM64, either:"
-    echo "  a) If Termux is installed on your device:"
-    echo "       adb shell 'cat /data/data/com.termux/files/usr/bin/proot' > /tmp/proot"
-    echo "       cp /tmp/proot $JNILIBS/libproot.so"
-    echo "  b) Download from Termux package repo:"
-    echo "       wget -q 'https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.4.0_aarch64.deb'"
-    echo "       dpkg -x proot_*.deb /tmp/proot-pkg"
-    echo "       cp /tmp/proot-pkg/data/data/com.termux/files/usr/bin/proot $JNILIBS/libproot.so"
-    echo ""
+    echo "Downloading proot-static for Android ARM64..."
+    # Use proot-static (statically linked) — the regular proot package requires
+    # libtalloc.so.2 which is a Termux-only library not present on stock Android.
+    PROOT_DEB="/tmp/proot-static-android.deb"
+    wget -q --show-progress \
+        "https://packages.termux.dev/apt/termux-main/pool/main/p/proot-static/proot-static_5.4.0_aarch64.deb" \
+        -O "$PROOT_DEB"
+    dpkg -x "$PROOT_DEB" /tmp/proot-static-pkg
+    PROOT_BIN=$(find /tmp/proot-static-pkg -type f -name "proot*" | head -1)
+    if [ -z "$PROOT_BIN" ]; then
+        echo "ERROR: could not find proot binary in package"
+        exit 1
+    fi
+    cp "$PROOT_BIN" "$JNILIBS/libproot.so"
+    rm -rf /tmp/proot-static-pkg "$PROOT_DEB"
+    echo "✓ proot-static → $JNILIBS/libproot.so"
 fi
 
 # ── Build APK ────────────────────────────────────────────────────────────────
