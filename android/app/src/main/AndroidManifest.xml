@@ -12,7 +12,7 @@
         android:label="DroidNode"
         android:allowBackup="false"
         android:supportsRtl="false"
-        android:extractNativeLibs="true">
+>
 
         <service
             android:name=".exposers.ForegroundServiceExposer"

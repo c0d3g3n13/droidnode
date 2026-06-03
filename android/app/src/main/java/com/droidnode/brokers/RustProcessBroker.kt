@@ -57,7 +57,7 @@ class RustProcessBroker(
 
         val proc = pb.start()
         process = proc
-        Log.i(TAG, "Rust agent started (pid=${proc.pid()})")
+        Log.i(TAG, "Rust agent started")
         return proc
     }
 
