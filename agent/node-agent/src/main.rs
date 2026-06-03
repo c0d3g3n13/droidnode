@@ -24,6 +24,10 @@ use executor::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // rustls 0.23 requires an explicit CryptoProvider before any TLS operations.
+    // With both kube and reqwest using rustls, the provider must be set once here.
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();
