@@ -98,10 +98,7 @@ if [ ! -f "$JNILIBS/libproot.so" ] || [ ! -f "$JNILIBS/libtalloc2.so" ]; then
 
     # Download matching libtalloc
     wget -q --show-progress \
-        "https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.1_aarch64.deb" \
-        -O "$WORK/libtalloc.deb" 2>/dev/null || \
-    wget -q --show-progress \
-        "https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.0_aarch64.deb" \
+        "https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.3_aarch64.deb" \
         -O "$WORK/libtalloc.deb"
     dpkg -x "$WORK/libtalloc.deb" "$WORK/talloc-pkg"
     TALLOC_LIB=$(find "$WORK/talloc-pkg" -name "libtalloc.so*" -type f | head -1)
