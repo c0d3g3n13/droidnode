@@ -51,6 +51,7 @@ impl ProotBroker for ProotBrokerImpl {
         let guest_tmp = rootfs.join("tmp");
         tokio::fs::create_dir_all(&guest_tmp).await?;
         ensure_workload_command_exists(rootfs, command)?;
+        let command = resolve_proot_command(rootfs, command)?;
 
         let mut cmd = Command::new(&self.proot_path);
 
@@ -102,7 +103,7 @@ impl ProotBroker for ProotBrokerImpl {
         }
 
         // Workload command
-        cmd.args(command);
+        cmd.args(&command);
 
         // Capture stdout/stderr for log streaming
         cmd.stdout(std::process::Stdio::piped());
@@ -160,6 +161,183 @@ fn ensure_workload_command_exists(rootfs: &Path, command: &[String]) -> Result<(
             )))
         }
     }
+}
+
+fn resolve_proot_command(rootfs: &Path, command: &[String]) -> Result<Vec<String>> {
+    let program = Path::new(&command[0]);
+
+    if !program.is_absolute() {
+        return Ok(command.to_vec());
+    }
+
+    let host_program = resolve_guest_path_to_host(rootfs, program)?;
+    let Some(interpreter) = read_elf_interpreter(&host_program)? else {
+        return Ok(command.to_vec());
+    };
+
+    let guest_interpreter = PathBuf::from(&interpreter);
+    let host_interpreter = resolve_guest_path_to_host(rootfs, &guest_interpreter)?;
+
+    if !host_interpreter.exists() {
+        return Err(DroidError::Workload(format!(
+            "ELF interpreter {interpreter} for {} is missing at {}",
+            program.display(),
+            host_interpreter.display()
+        )));
+    }
+
+    let mut rewritten = Vec::with_capacity(command.len() + 1);
+    rewritten.push(interpreter);
+    rewritten.extend(command.iter().cloned());
+
+    info!(
+        program = %program.display(),
+        interpreter = %rewritten[0],
+        "running workload through guest ELF interpreter"
+    );
+
+    Ok(rewritten)
+}
+
+fn guest_path_to_host(rootfs: &Path, guest_path: &Path) -> PathBuf {
+    guest_path
+        .strip_prefix("/")
+        .map(|relative| rootfs.join(relative))
+        .unwrap_or_else(|_| rootfs.join(guest_path))
+}
+
+fn resolve_guest_path_to_host(rootfs: &Path, guest_path: &Path) -> Result<PathBuf> {
+    let mut current_guest = guest_path.to_path_buf();
+
+    for _ in 0..16 {
+        let host_path = guest_path_to_host(rootfs, &current_guest);
+        let metadata = std::fs::symlink_metadata(&host_path)?;
+
+        if !metadata.file_type().is_symlink() {
+            return Ok(host_path);
+        }
+
+        let target = std::fs::read_link(&host_path)?;
+        current_guest = if target.is_absolute() {
+            target
+        } else {
+            current_guest
+                .parent()
+                .unwrap_or_else(|| Path::new("/"))
+                .join(target)
+        };
+    }
+
+    Err(DroidError::Workload(format!(
+        "too many symlinks while resolving {}",
+        guest_path.display()
+    )))
+}
+
+fn read_elf_interpreter(path: &Path) -> Result<Option<String>> {
+    let bytes = std::fs::read(path)?;
+
+    if bytes.len() < 64 || &bytes[0..4] != b"\x7FELF" {
+        return Ok(None);
+    }
+
+    let class = bytes[4];
+    let endian = bytes[5];
+
+    if endian != 1 {
+        return Ok(None);
+    }
+
+    match class {
+        1 => read_elf32_interpreter(&bytes),
+        2 => read_elf64_interpreter(&bytes),
+        _ => Ok(None),
+    }
+}
+
+fn read_elf64_interpreter(bytes: &[u8]) -> Result<Option<String>> {
+    let phoff = read_u64_le(bytes, 32)? as usize;
+    let phentsize = read_u16_le(bytes, 54)? as usize;
+    let phnum = read_u16_le(bytes, 56)? as usize;
+
+    for index in 0..phnum {
+        let offset = phoff + index * phentsize;
+        if offset + 56 > bytes.len() {
+            break;
+        }
+
+        let p_type = read_u32_le(bytes, offset)?;
+        if p_type != 3 {
+            continue;
+        }
+
+        let p_offset = read_u64_le(bytes, offset + 8)? as usize;
+        let p_filesz = read_u64_le(bytes, offset + 32)? as usize;
+        return read_interpreter_string(bytes, p_offset, p_filesz);
+    }
+
+    Ok(None)
+}
+
+fn read_elf32_interpreter(bytes: &[u8]) -> Result<Option<String>> {
+    let phoff = read_u32_le(bytes, 28)? as usize;
+    let phentsize = read_u16_le(bytes, 42)? as usize;
+    let phnum = read_u16_le(bytes, 44)? as usize;
+
+    for index in 0..phnum {
+        let offset = phoff + index * phentsize;
+        if offset + 32 > bytes.len() {
+            break;
+        }
+
+        let p_type = read_u32_le(bytes, offset)?;
+        if p_type != 3 {
+            continue;
+        }
+
+        let p_offset = read_u32_le(bytes, offset + 4)? as usize;
+        let p_filesz = read_u32_le(bytes, offset + 16)? as usize;
+        return read_interpreter_string(bytes, p_offset, p_filesz);
+    }
+
+    Ok(None)
+}
+
+fn read_interpreter_string(bytes: &[u8], offset: usize, len: usize) -> Result<Option<String>> {
+    if offset >= bytes.len() {
+        return Ok(None);
+    }
+
+    let end = offset.saturating_add(len).min(bytes.len());
+    let raw = &bytes[offset..end];
+    let nul = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+
+    String::from_utf8(raw[..nul].to_vec())
+        .map(Some)
+        .map_err(|e| DroidError::Workload(format!("invalid ELF interpreter string: {e}")))
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize) -> Result<u16> {
+    let Some(slice) = bytes.get(offset..offset + 2) else {
+        return Err(DroidError::Workload("truncated ELF header".into()));
+    };
+    Ok(u16::from_le_bytes([slice[0], slice[1]]))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32> {
+    let Some(slice) = bytes.get(offset..offset + 4) else {
+        return Err(DroidError::Workload("truncated ELF header".into()));
+    };
+    Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize) -> Result<u64> {
+    let Some(slice) = bytes.get(offset..offset + 8) else {
+        return Err(DroidError::Workload("truncated ELF header".into()));
+    };
+    Ok(u64::from_le_bytes([
+        slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
+    ]))
 }
 
 #[cfg(test)]
