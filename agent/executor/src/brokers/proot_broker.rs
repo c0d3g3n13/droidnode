@@ -193,7 +193,8 @@ fn resolve_proot_command(rootfs: &Path, command: &[String]) -> Result<Vec<String
 
     info!(
         program = %program.display(),
-        interpreter = %rewritten[0],
+        interpreter = %resolved_interpreter.display(),
+        host_interpreter = %host_interpreter.display(),
         "running workload through guest ELF interpreter"
     );
 
