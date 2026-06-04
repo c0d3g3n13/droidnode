@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::process::{Child, Command};
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use crate::error::{DroidError, Result};
 use crate::models::Mount;
@@ -48,14 +48,19 @@ impl ProotBroker for ProotBrokerImpl {
             return Err(DroidError::Process("command is empty".into()));
         }
 
+        let guest_tmp = rootfs.join("tmp");
+        tokio::fs::create_dir_all(&guest_tmp).await?;
+
         let mut cmd = Command::new(&self.proot_path);
 
         // Disable proot's seccomp acceleration — conflicts with host and Android kernel
         // seccomp filters. Pure ptrace mode is slower but works everywhere.
         cmd.env("PROOT_NO_SECCOMP", "1");
+        cmd.env("TMPDIR", &guest_tmp);
 
         // Root filesystem
         cmd.args(["-r", rootfs.to_str().unwrap_or("/")]);
+        cmd.args(["-w", "/"]);
 
         // Default Linux pseudo-filesystems
         cmd.args(["-b", "/dev"]);
@@ -64,6 +69,15 @@ impl ProotBroker for ProotBrokerImpl {
 
         // Additional mounts from the pod spec
         for mount in mounts {
+            if !mount.source.exists() {
+                warn!(
+                    source = %mount.source.display(),
+                    target = %mount.target.display(),
+                    "skipping bind mount because host source does not exist"
+                );
+                continue;
+            }
+
             let bind = if mount.read_only {
                 format!(
                     "{}:{}",
