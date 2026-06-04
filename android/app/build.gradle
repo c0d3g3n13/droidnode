@@ -10,7 +10,10 @@ android {
     defaultConfig {
         applicationId "com.droidnode"
         minSdk 26
-        targetSdk 34
+        // Android 10+ blocks exec from app-writable directories for targetSdk 29+.
+        // DroidNode unpacks OCI rootfs trees at runtime and proot must exec those
+        // guest binaries, so the prototype intentionally targets 28.
+        targetSdk 28
         versionCode 1
         versionName "0.1.0"
     }
