@@ -52,6 +52,14 @@ impl ProotBroker for ProotBrokerImpl {
         tokio::fs::create_dir_all(&guest_tmp).await?;
         ensure_workload_command_exists(rootfs, command)?;
 
+        // Alpine (and other musl images) ship the ELF interpreter as an absolute symlink:
+        //   <rootfs>/lib/ld-musl-aarch64.so.1 -> /lib/libc.musl-aarch64.so.1
+        // When proot hands that symlink path to execve, the kernel follows the absolute
+        // target in the HOST namespace where it doesn't exist → ENOENT.
+        // Fix: replace the symlink with a hard link to the concrete file so the kernel
+        // execs the real binary directly, with no cross-namespace symlink chasing.
+        fix_interpreter_symlink(rootfs, command)?;
+
         let mut cmd = Command::new(&self.proot_path);
 
         // Disable proot's seccomp acceleration — conflicts with host and Android kernel
@@ -63,17 +71,6 @@ impl ProotBroker for ProotBrokerImpl {
         // Root filesystem
         cmd.args(["-r", rootfs.to_str().unwrap_or("/")]);
         cmd.args(["-w", "/"]);
-
-        // Resolve the guest ELF interpreter symlink chain to a concrete host path and
-        // pass it via --loader. Without this, proot hands the kernel the symlink path
-        // (e.g. <rootfs>/lib/ld-musl-aarch64.so.1) and the kernel follows its absolute
-        // target (/lib/libc.musl-aarch64.so.1) in the HOST namespace — which doesn't
-        // exist on Android — producing ENOENT. --loader gives proot a direct, non-symlink
-        // host path so the kernel can exec it without cross-namespace symlink resolution.
-        if let Some(loader) = resolve_proot_loader(rootfs, command)? {
-            cmd.arg("--loader");
-            cmd.arg(&loader);
-        }
 
         // Default Linux pseudo-filesystems
         cmd.args(["-b", "/dev"]);
@@ -112,7 +109,7 @@ impl ProotBroker for ProotBrokerImpl {
             cmd.env(key, val);
         }
 
-        // Workload command (original, unmodified — interpreter is handled via --loader)
+        // Workload command
         cmd.args(command);
 
         // Capture stdout/stderr for log streaming
@@ -173,38 +170,50 @@ fn ensure_workload_command_exists(rootfs: &Path, command: &[String]) -> Result<(
     }
 }
 
-fn resolve_proot_loader(rootfs: &Path, command: &[String]) -> Result<Option<PathBuf>> {
+fn fix_interpreter_symlink(rootfs: &Path, command: &[String]) -> Result<()> {
     let program = Path::new(&command[0]);
-
     if !program.is_absolute() {
-        return Ok(None);
+        return Ok(());
     }
 
     let host_program = resolve_guest_path_to_host(rootfs, program)?;
     let Some(interpreter) = read_elf_interpreter(&host_program)? else {
-        return Ok(None);
+        return Ok(());
     };
 
-    let guest_interpreter = PathBuf::from(&interpreter);
-    let resolved_interpreter = resolve_guest_path(rootfs, &guest_interpreter)?;
-    let host_interpreter = guest_path_to_host(rootfs, &resolved_interpreter);
+    let interp_host = guest_path_to_host(rootfs, Path::new(&interpreter));
+    let meta = match std::fs::symlink_metadata(&interp_host) {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    if !meta.file_type().is_symlink() {
+        return Ok(()); // already a concrete file
+    }
 
-    if !host_interpreter.exists() {
+    let resolved_guest = resolve_guest_path(rootfs, Path::new(&interpreter))?;
+    let resolved_host = guest_path_to_host(rootfs, &resolved_guest);
+    if !resolved_host.exists() {
         return Err(DroidError::Workload(format!(
-            "ELF interpreter {interpreter} for {} is missing at {}",
-            program.display(),
-            host_interpreter.display()
+            "ELF interpreter {interpreter} resolved to {} which does not exist",
+            resolved_host.display()
         )));
     }
 
+    // Replace the absolute symlink with a hard link to the concrete binary.
+    // Hard link preferred (no extra disk space); fall back to copy if the
+    // filesystem doesn't support it (e.g. cross-device).
+    std::fs::remove_file(&interp_host)?;
+    if std::fs::hard_link(&resolved_host, &interp_host).is_err() {
+        std::fs::copy(&resolved_host, &interp_host)?;
+    }
+
     info!(
-        program = %program.display(),
-        interpreter = %resolved_interpreter.display(),
-        host_interpreter = %host_interpreter.display(),
-        "using resolved guest ELF interpreter as proot --loader"
+        interpreter = %interpreter,
+        resolved = %resolved_guest.display(),
+        "replaced absolute interpreter symlink with hard link for proot exec compatibility"
     );
 
-    Ok(Some(host_interpreter))
+    Ok(())
 }
 
 fn guest_path_to_host(rootfs: &Path, guest_path: &Path) -> PathBuf {
