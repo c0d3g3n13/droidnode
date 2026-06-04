@@ -176,7 +176,8 @@ fn resolve_proot_command(rootfs: &Path, command: &[String]) -> Result<Vec<String
     };
 
     let guest_interpreter = PathBuf::from(&interpreter);
-    let host_interpreter = resolve_guest_path_to_host(rootfs, &guest_interpreter)?;
+    let resolved_interpreter = resolve_guest_path(rootfs, &guest_interpreter)?;
+    let host_interpreter = guest_path_to_host(rootfs, &resolved_interpreter);
 
     if !host_interpreter.exists() {
         return Err(DroidError::Workload(format!(
@@ -187,7 +188,7 @@ fn resolve_proot_command(rootfs: &Path, command: &[String]) -> Result<Vec<String
     }
 
     let mut rewritten = Vec::with_capacity(command.len() + 1);
-    rewritten.push(interpreter);
+    rewritten.push(resolved_interpreter.display().to_string());
     rewritten.extend(command.iter().cloned());
 
     info!(
@@ -206,7 +207,7 @@ fn guest_path_to_host(rootfs: &Path, guest_path: &Path) -> PathBuf {
         .unwrap_or_else(|_| rootfs.join(guest_path))
 }
 
-fn resolve_guest_path_to_host(rootfs: &Path, guest_path: &Path) -> Result<PathBuf> {
+fn resolve_guest_path(rootfs: &Path, guest_path: &Path) -> Result<PathBuf> {
     let mut current_guest = guest_path.to_path_buf();
 
     for _ in 0..16 {
@@ -214,7 +215,7 @@ fn resolve_guest_path_to_host(rootfs: &Path, guest_path: &Path) -> Result<PathBu
         let metadata = std::fs::symlink_metadata(&host_path)?;
 
         if !metadata.file_type().is_symlink() {
-            return Ok(host_path);
+            return Ok(current_guest);
         }
 
         let target = std::fs::read_link(&host_path)?;
@@ -232,6 +233,11 @@ fn resolve_guest_path_to_host(rootfs: &Path, guest_path: &Path) -> Result<PathBu
         "too many symlinks while resolving {}",
         guest_path.display()
     )))
+}
+
+fn resolve_guest_path_to_host(rootfs: &Path, guest_path: &Path) -> Result<PathBuf> {
+    let resolved_guest_path = resolve_guest_path(rootfs, guest_path)?;
+    Ok(guest_path_to_host(rootfs, &resolved_guest_path))
 }
 
 fn read_elf_interpreter(path: &Path) -> Result<Option<String>> {
