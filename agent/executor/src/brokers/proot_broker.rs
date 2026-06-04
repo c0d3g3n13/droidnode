@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::process::{Child, Command};
-use tracing::{instrument, warn};
+use tracing::{info, instrument, warn};
 
 use crate::error::{DroidError, Result};
 use crate::models::Mount;
@@ -50,12 +50,14 @@ impl ProotBroker for ProotBrokerImpl {
 
         let guest_tmp = rootfs.join("tmp");
         tokio::fs::create_dir_all(&guest_tmp).await?;
+        ensure_workload_command_exists(rootfs, command)?;
 
         let mut cmd = Command::new(&self.proot_path);
 
         // Disable proot's seccomp acceleration — conflicts with host and Android kernel
         // seccomp filters. Pure ptrace mode is slower but works everywhere.
         cmd.env("PROOT_NO_SECCOMP", "1");
+        cmd.env("PROOT_TMP_DIR", &guest_tmp);
         cmd.env("TMPDIR", &guest_tmp);
 
         // Root filesystem
@@ -111,6 +113,52 @@ impl ProotBroker for ProotBrokerImpl {
             .map_err(|e| DroidError::Process(format!("proot spawn failed: {e}")))?;
 
         Ok(child)
+    }
+}
+
+fn ensure_workload_command_exists(rootfs: &Path, command: &[String]) -> Result<()> {
+    let program = Path::new(&command[0]);
+
+    if !program.is_absolute() {
+        return Ok(());
+    }
+
+    let guest_program = program
+        .strip_prefix("/")
+        .map(|relative| rootfs.join(relative))
+        .unwrap_or_else(|_| rootfs.join(program));
+
+    let metadata = std::fs::symlink_metadata(&guest_program);
+    match metadata {
+        Ok(meta) => {
+            let file_type = meta.file_type();
+            info!(
+                guest = %program.display(),
+                host = %guest_program.display(),
+                is_file = file_type.is_file(),
+                is_symlink = file_type.is_symlink(),
+                "workload command found in rootfs"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let bin_entries = std::fs::read_dir(rootfs.join("bin"))
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok())
+                        .take(20)
+                        .filter_map(|entry| entry.file_name().into_string().ok())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_else(|_| "<missing bin dir>".to_string());
+
+            Err(DroidError::Workload(format!(
+                "workload command {} not found at {}: {e}; rootfs bin entries: {bin_entries}",
+                program.display(),
+                guest_program.display()
+            )))
+        }
     }
 }
 

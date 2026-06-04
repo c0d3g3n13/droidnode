@@ -19,6 +19,7 @@ class RustProcessBroker(
     private val prootPath: File,
     private val dataDir: File,
     private val cacheDir: File,
+    private val codeCacheDir: File,
     private val nativeLibDir: String,
     private val kubeConfigPath: File,
     private val nodeId: String,
@@ -31,7 +32,8 @@ class RustProcessBroker(
         if (!binaryPath.exists()) error("node-agent binary not found at ${binaryPath.absolutePath}")
 
         val layersDir = File(dataDir, "layers").also { it.mkdirs() }
-        val rootfsDir = File(dataDir, "rootfs").also { it.mkdirs() }
+        val rootfsDir = File(codeCacheDir, "rootfs").also { it.mkdirs() }
+        val tmpDir = File(codeCacheDir, "tmp").also { it.mkdirs() }
 
         val pb = ProcessBuilder(binaryPath.absolutePath)
             .directory(dataDir)
@@ -50,7 +52,7 @@ class RustProcessBroker(
                     put("KUBECONFIG", kubeConfigPath.absolutePath)
                     // Runtime dirs — Rust stdlib and proot child processes need these
                     put("HOME", dataDir.absolutePath)
-                    put("TMPDIR", cacheDir.absolutePath)
+                    put("TMPDIR", tmpDir.absolutePath)
                     // proot is patched to look for libtalloc2.so via $ORIGIN RPATH,
                     // but set LD_LIBRARY_PATH as a fallback for the dynamic linker.
                     put("LD_LIBRARY_PATH", nativeLibDir)
