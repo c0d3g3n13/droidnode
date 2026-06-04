@@ -51,7 +51,6 @@ impl ProotBroker for ProotBrokerImpl {
         let guest_tmp = rootfs.join("tmp");
         tokio::fs::create_dir_all(&guest_tmp).await?;
         ensure_workload_command_exists(rootfs, command)?;
-        let command = resolve_proot_command(rootfs, command)?;
 
         let mut cmd = Command::new(&self.proot_path);
 
@@ -64,6 +63,17 @@ impl ProotBroker for ProotBrokerImpl {
         // Root filesystem
         cmd.args(["-r", rootfs.to_str().unwrap_or("/")]);
         cmd.args(["-w", "/"]);
+
+        // Resolve the guest ELF interpreter symlink chain to a concrete host path and
+        // pass it via --loader. Without this, proot hands the kernel the symlink path
+        // (e.g. <rootfs>/lib/ld-musl-aarch64.so.1) and the kernel follows its absolute
+        // target (/lib/libc.musl-aarch64.so.1) in the HOST namespace — which doesn't
+        // exist on Android — producing ENOENT. --loader gives proot a direct, non-symlink
+        // host path so the kernel can exec it without cross-namespace symlink resolution.
+        if let Some(loader) = resolve_proot_loader(rootfs, command)? {
+            cmd.arg("--loader");
+            cmd.arg(&loader);
+        }
 
         // Default Linux pseudo-filesystems
         cmd.args(["-b", "/dev"]);
@@ -102,8 +112,8 @@ impl ProotBroker for ProotBrokerImpl {
             cmd.env(key, val);
         }
 
-        // Workload command
-        cmd.args(&command);
+        // Workload command (original, unmodified — interpreter is handled via --loader)
+        cmd.args(command);
 
         // Capture stdout/stderr for log streaming
         cmd.stdout(std::process::Stdio::piped());
@@ -163,16 +173,16 @@ fn ensure_workload_command_exists(rootfs: &Path, command: &[String]) -> Result<(
     }
 }
 
-fn resolve_proot_command(rootfs: &Path, command: &[String]) -> Result<Vec<String>> {
+fn resolve_proot_loader(rootfs: &Path, command: &[String]) -> Result<Option<PathBuf>> {
     let program = Path::new(&command[0]);
 
     if !program.is_absolute() {
-        return Ok(command.to_vec());
+        return Ok(None);
     }
 
     let host_program = resolve_guest_path_to_host(rootfs, program)?;
     let Some(interpreter) = read_elf_interpreter(&host_program)? else {
-        return Ok(command.to_vec());
+        return Ok(None);
     };
 
     let guest_interpreter = PathBuf::from(&interpreter);
@@ -187,18 +197,14 @@ fn resolve_proot_command(rootfs: &Path, command: &[String]) -> Result<Vec<String
         )));
     }
 
-    let mut rewritten = Vec::with_capacity(command.len() + 1);
-    rewritten.push(resolved_interpreter.display().to_string());
-    rewritten.extend(command.iter().cloned());
-
     info!(
         program = %program.display(),
         interpreter = %resolved_interpreter.display(),
         host_interpreter = %host_interpreter.display(),
-        "running workload through guest ELF interpreter"
+        "using resolved guest ELF interpreter as proot --loader"
     );
 
-    Ok(rewritten)
+    Ok(Some(host_interpreter))
 }
 
 fn guest_path_to_host(rootfs: &Path, guest_path: &Path) -> PathBuf {
