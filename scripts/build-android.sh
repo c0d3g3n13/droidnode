@@ -102,10 +102,67 @@ if [ ! -f "$JNILIBS/libproot.so" ] || [ ! -f "$JNILIBS/libtalloc2.so" ] || [ ! -
     # code_cache/tmp has dalvikcache_data_file type; on most Android 10+ devices
     # untrusted_app lacks the execute (not execmod) SELinux permission for that type,
     # so proot's own loader extraction there silently fails.
-    PROOT_LOADER_BIN=$(find "$WORK/proot-pkg" -path "*/lib/proot/loader" ! -name "loader32" | head -1)
+    # Try to find the loader as a separate file in the package.
+    # Termux proot 5.1.107+ ships usr/lib/proot/loader; older builds embed it.
+    PROOT_LOADER_BIN=$(find "$WORK/proot-pkg" -type f \
+        \( -path "*/lib/proot/loader" -o -path "*/proot/loader" \) \
+        ! -name "loader32" ! -name "*.so" | head -1)
+
     if [ -z "$PROOT_LOADER_BIN" ]; then
-        echo "ERROR: proot loader binary not found in package (expected usr/lib/proot/loader)"
-        exit 1
+        echo "Loader not found as a separate package file."
+        echo "Package contents:"
+        find "$WORK/proot-pkg" -type f | sort | sed 's|^|  |'
+        echo ""
+        echo "Extracting embedded loader ELF from proot binary..."
+
+        # The loader is compiled into proot as a C byte array.
+        # Find the second ELF header in the binary (first = proot itself) and
+        # extract until the end of its section-header table — that is the true
+        # file boundary of the embedded ELF.
+        cat > "$WORK/extract_loader.py" << 'PYEOF'
+import sys, struct
+
+proot_path, out_path = sys.argv[1], sys.argv[2]
+with open(proot_path, 'rb') as f:
+    data = f.read()
+
+magic = b'\x7fELF'
+pos = data.find(magic, 4)   # skip the outer ELF (proot itself at offset 0)
+while pos != -1:
+    if pos + 64 > len(data):
+        pos = data.find(magic, pos + 4)
+        continue
+    ei_class = data[pos + 4]
+    ei_data  = data[pos + 5]
+    if ei_data == 1 and ei_class in (1, 2):   # little-endian, 32 or 64-bit
+        try:
+            if ei_class == 2:
+                shoff     = struct.unpack_from('<Q', data, pos + 40)[0]
+                shentsize = struct.unpack_from('<H', data, pos + 58)[0]
+                shnum     = struct.unpack_from('<H', data, pos + 60)[0]
+            else:
+                shoff     = struct.unpack_from('<I', data, pos + 32)[0]
+                shentsize = struct.unpack_from('<H', data, pos + 46)[0]
+                shnum     = struct.unpack_from('<H', data, pos + 48)[0]
+            size = shoff + shentsize * shnum
+            if 4096 <= size <= 5 * 1024 * 1024 and pos + size <= len(data):
+                with open(out_path, 'wb') as f:
+                    f.write(data[pos:pos + size])
+                print(f'Extracted loader: offset={pos}, size={size}')
+                sys.exit(0)
+        except Exception:
+            pass
+    pos = data.find(magic, pos + 4)
+
+print('ERROR: no embedded loader ELF found in proot binary', file=sys.stderr)
+sys.exit(1)
+PYEOF
+
+        python3 "$WORK/extract_loader.py" "$PROOT_BIN" "$WORK/proot-loader"
+        PROOT_LOADER_BIN="$WORK/proot-loader"
+        echo "✓ loader extracted from proot binary"
+    else
+        echo "✓ loader found in package: $PROOT_LOADER_BIN"
     fi
 
     # Download matching libtalloc
