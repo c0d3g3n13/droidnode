@@ -115,10 +115,10 @@ if [ ! -f "$JNILIBS/libproot.so" ] || [ ! -f "$JNILIBS/libtalloc2.so" ] || [ ! -
         echo ""
         echo "Extracting embedded loader ELF from proot binary..."
 
-        # The loader is compiled into proot as a C byte array.
-        # Find the second ELF header in the binary (first = proot itself) and
-        # extract until the end of its section-header table — that is the true
-        # file boundary of the embedded ELF.
+        # The loader is compiled into proot as a C byte array (see src/loader/elf.h).
+        # Scan the binary for a second ELF magic, determine its file size using
+        # the section-header table (with a program-header fallback for stripped ELFs),
+        # and prefer the aarch64 64-bit ELF when multiple candidates are found.
         cat > "$WORK/extract_loader.py" << 'PYEOF'
 import sys, struct
 
@@ -126,39 +126,98 @@ proot_path, out_path = sys.argv[1], sys.argv[2]
 with open(proot_path, 'rb') as f:
     data = f.read()
 
-magic = b'\x7fELF'
-pos = data.find(magic, 4)   # skip the outer ELF (proot itself at offset 0)
-while pos != -1:
-    if pos + 64 > len(data):
-        pos = data.find(magic, pos + 4)
-        continue
-    ei_class = data[pos + 4]
-    ei_data  = data[pos + 5]
-    if ei_data == 1 and ei_class in (1, 2):   # little-endian, 32 or 64-bit
-        try:
-            if ei_class == 2:
-                shoff     = struct.unpack_from('<Q', data, pos + 40)[0]
-                shentsize = struct.unpack_from('<H', data, pos + 58)[0]
-                shnum     = struct.unpack_from('<H', data, pos + 60)[0]
+ARCH_NAMES = {0xB7: 'aarch64', 0x28: 'arm32', 0x3E: 'x86_64', 0x03: 'x86'}
+
+def elf_size(data, pos):
+    """Return (size, bits, arch_str) for the ELF at data[pos], or None."""
+    if pos + 64 > len(data) or data[pos:pos+4] != b'\x7fELF':
+        return None
+    ei_class, ei_data = data[pos+4], data[pos+5]
+    if ei_data != 1 or ei_class not in (1, 2):   # require little-endian
+        return None
+    try:
+        if ei_class == 2:   # 64-bit
+            e_machine = struct.unpack_from('<H', data, pos+18)[0]
+            e_phoff   = struct.unpack_from('<Q', data, pos+32)[0]
+            e_phentsz = struct.unpack_from('<H', data, pos+54)[0]
+            e_phnum   = struct.unpack_from('<H', data, pos+56)[0]
+            e_shoff   = struct.unpack_from('<Q', data, pos+40)[0]
+            e_shentsz = struct.unpack_from('<H', data, pos+58)[0]
+            e_shnum   = struct.unpack_from('<H', data, pos+60)[0]
+            bits = 64
+        else:               # 32-bit
+            e_machine = struct.unpack_from('<H', data, pos+18)[0]
+            e_phoff   = struct.unpack_from('<I', data, pos+28)[0]
+            e_phentsz = struct.unpack_from('<H', data, pos+42)[0]
+            e_phnum   = struct.unpack_from('<H', data, pos+44)[0]
+            e_shoff   = struct.unpack_from('<I', data, pos+32)[0]
+            e_shentsz = struct.unpack_from('<H', data, pos+46)[0]
+            e_shnum   = struct.unpack_from('<H', data, pos+48)[0]
+            bits = 32
+    except struct.error:
+        return None
+
+    arch = ARCH_NAMES.get(e_machine, f'0x{e_machine:x}')
+    size = 0
+
+    # Primary: section-header table end (works for non-stripped ELFs)
+    if e_shoff > 0 and e_shnum > 0:
+        size = e_shoff + e_shentsz * e_shnum
+
+    # Fallback: last PT_LOAD segment end (handles stripped ELFs)
+    if size < 4096 and e_phoff > 0 and e_phnum > 0:
+        max_end = 0
+        for i in range(min(e_phnum, 64)):
+            ph = pos + e_phoff + i * e_phentsz
+            if ph + e_phentsz > len(data):
+                break
+            if bits == 64:
+                p_type   = struct.unpack_from('<I', data, ph)[0]
+                p_offset = struct.unpack_from('<Q', data, ph+8)[0]
+                p_filesz = struct.unpack_from('<Q', data, ph+32)[0]
             else:
-                shoff     = struct.unpack_from('<I', data, pos + 32)[0]
-                shentsize = struct.unpack_from('<H', data, pos + 46)[0]
-                shnum     = struct.unpack_from('<H', data, pos + 48)[0]
-            size = shoff + shentsize * shnum
-            if 4096 <= size <= 5 * 1024 * 1024 and pos + size <= len(data):
-                with open(out_path, 'wb') as f:
-                    f.write(data[pos:pos + size])
-                print(f'Extracted loader: offset={pos}, size={size}')
-                sys.exit(0)
-        except Exception:
-            pass
+                p_type   = struct.unpack_from('<I', data, ph)[0]
+                p_offset = struct.unpack_from('<I', data, ph+4)[0]
+                p_filesz = struct.unpack_from('<I', data, ph+16)[0]
+            if p_type == 1:  # PT_LOAD
+                max_end = max(max_end, p_offset + p_filesz)
+        if max_end > 4096:
+            size = (max_end + 4095) & ~4095   # page-align
+
+    if 4096 <= size <= 10*1024*1024 and pos + size <= len(data):
+        return size, bits, arch
+    return None
+
+candidates = []
+magic = b'\x7fELF'
+pos = data.find(magic, 4)   # skip outer ELF (proot itself at offset 0)
+while pos != -1:
+    result = elf_size(data, pos)
+    if result:
+        size, bits, arch = result
+        print(f'  candidate ELF at offset {pos}: {bits}-bit {arch}, size {size}')
+        candidates.append((pos, size, bits, arch))
     pos = data.find(magic, pos + 4)
+
+# Prefer aarch64 64-bit, then any 64-bit, then anything
+for want_arch, want_bits in [('aarch64', 64), (None, 64), (None, None)]:
+    for pos, size, bits, arch in candidates:
+        if (want_arch is None or arch == want_arch) and (want_bits is None or bits == want_bits):
+            with open(out_path, 'wb') as f:
+                f.write(data[pos:pos+size])
+            print(f'Extracted {arch} {bits}-bit loader: offset={pos}, size={size}')
+            sys.exit(0)
 
 print('ERROR: no embedded loader ELF found in proot binary', file=sys.stderr)
 sys.exit(1)
 PYEOF
 
         python3 "$WORK/extract_loader.py" "$PROOT_BIN" "$WORK/proot-loader"
+        if ! readelf -h "$WORK/proot-loader" 2>/dev/null | grep -q "Machine"; then
+            echo "ERROR: extracted file is not a valid ELF (readelf check failed)"
+            exit 1
+        fi
+        echo "Loader info: $(readelf -h "$WORK/proot-loader" 2>/dev/null | grep -E 'Class|Machine|Type' | tr '\n' ' ')"
         PROOT_LOADER_BIN="$WORK/proot-loader"
         echo "✓ loader extracted from proot binary"
     else
