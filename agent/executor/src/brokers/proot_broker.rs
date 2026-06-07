@@ -51,12 +51,14 @@ impl ProotBroker for ProotBrokerImpl {
         let guest_tmp = rootfs.join("tmp");
         tokio::fs::create_dir_all(&guest_tmp).await?;
 
-        // proot's own temp dir must be OUTSIDE the rootfs. If it were inside, proot
-        // would translate its own loader path through guest remapping and fail to exec it.
-        let proot_tmp = rootfs
-            .parent()
-            .unwrap_or(rootfs)
-            .join(".proot_tmp");
+        // PROOT_TMP_DIR must be:
+        //   (a) outside the rootfs (or proot double-translates its own loader path), and
+        //   (b) on an executable filesystem (code_cache on Android; filesDir is noexec on API 29+).
+        // The Kotlin layer sets TMPDIR to code_cache/tmp — inherit that here.
+        // Fallback: /tmp (works on Linux desktop, fails silently on Android noexec mounts).
+        let proot_tmp = std::env::var("TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir());
         tokio::fs::create_dir_all(&proot_tmp).await?;
 
         ensure_workload_command_exists(rootfs, command)?;
@@ -72,6 +74,7 @@ impl ProotBroker for ProotBrokerImpl {
         info!(
             proot = %self.proot_path.display(),
             rootfs = %rootfs.display(),
+            proot_tmp = %proot_tmp.display(),
             raw_command = ?command,
             final_argv = ?proot_command,
             "spawning proot"
