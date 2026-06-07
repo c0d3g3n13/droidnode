@@ -62,11 +62,21 @@ impl ProotBroker for ProotBrokerImpl {
 
         ensure_workload_command_exists(rootfs, command)?;
 
+        // For dynamically-linked ELF binaries the kernel loads PT_INTERP from the HOST
+        // filesystem during execve, before proot's ptrace interception is active. On a
+        // glibc host (Android/Kali) the guest interpreter (musl, ld-linux-aarch64) does
+        // not exist at its expected host path → ENOENT. We avoid this by prepending the
+        // symlink-resolved interpreter guest path as the first proot argument. proot execs
+        // the interpreter directly (it has no PT_INTERP of its own), and from that point
+        // every file access goes through proot's syscall translation which correctly handles
+        // rootfs-relative symlinks. The original argv is kept intact so argv[0] is preserved.
+        let proot_argv = build_proot_argv(rootfs, command);
+
         info!(
             proot = %self.proot_path.display(),
             rootfs = %rootfs.display(),
             proot_tmp = %proot_tmp.display(),
-            command = ?command,
+            argv = ?proot_argv,
             "spawning proot"
         );
 
@@ -112,7 +122,7 @@ impl ProotBroker for ProotBrokerImpl {
             cmd.env(key, val);
         }
 
-        cmd.args(command);
+        cmd.args(&proot_argv);
 
         // Capture stdout/stderr for log streaming
         cmd.stdout(std::process::Stdio::piped());
@@ -170,6 +180,148 @@ fn ensure_workload_command_exists(rootfs: &Path, command: &[String]) -> Result<(
             )))
         }
     }
+}
+
+// Build the argv vector passed to proot.
+//
+// For dynamically-linked ELF binaries proot must exec the interpreter (musl ld.so)
+// directly so that the kernel never looks for PT_INTERP on the HOST filesystem.
+// We prepend the symlink-resolved interpreter guest path; proot translates it to
+// a host path inside the rootfs and execs it. The interpreter then opens all
+// subsequent files via proot's syscall translation. The original argv is kept so
+// that argv[0] inside the guest program is correct (e.g. busybox honours argv[0]
+// to decide which applet to run).
+fn build_proot_argv(rootfs: &Path, command: &[String]) -> Vec<String> {
+    let program = Path::new(&command[0]);
+    if !program.is_absolute() {
+        return command.to_vec();
+    }
+
+    let resolved_program = match resolve_guest_path(rootfs, program) {
+        Ok(p) => p,
+        Err(_) => return command.to_vec(),
+    };
+    let host_program = guest_path_to_host(rootfs, &resolved_program);
+
+    let interpreter = match read_elf_interpreter(&host_program) {
+        Ok(Some(i)) => i,
+        _ => return command.to_vec(),
+    };
+
+    let resolved_interp = match resolve_guest_path(rootfs, Path::new(&interpreter)) {
+        Ok(p) => p,
+        Err(_) => return command.to_vec(),
+    };
+    if !guest_path_to_host(rootfs, &resolved_interp).exists() {
+        return command.to_vec();
+    }
+
+    let mut argv = Vec::with_capacity(command.len() + 1);
+    argv.push(resolved_interp.display().to_string());
+    argv.extend_from_slice(command);
+
+    info!(
+        program = %program.display(),
+        interpreter = %resolved_interp.display(),
+        "prepending ELF interpreter to proot argv"
+    );
+    argv
+}
+
+fn guest_path_to_host(rootfs: &Path, guest_path: &Path) -> PathBuf {
+    guest_path
+        .strip_prefix("/")
+        .map(|rel| rootfs.join(rel))
+        .unwrap_or_else(|_| rootfs.join(guest_path))
+}
+
+fn resolve_guest_path(rootfs: &Path, guest_path: &Path) -> Result<PathBuf> {
+    let mut current = guest_path.to_path_buf();
+    for _ in 0..16 {
+        let host = guest_path_to_host(rootfs, &current);
+        let meta = std::fs::symlink_metadata(&host)?;
+        if !meta.file_type().is_symlink() {
+            return Ok(current);
+        }
+        let target = std::fs::read_link(&host)?;
+        current = if target.is_absolute() {
+            target
+        } else {
+            current.parent().unwrap_or(Path::new("/")).join(target)
+        };
+    }
+    Err(DroidError::Workload(format!(
+        "too many symlinks resolving {}",
+        guest_path.display()
+    )))
+}
+
+fn read_elf_interpreter(path: &Path) -> Result<Option<String>> {
+    let bytes = std::fs::read(path)?;
+    if bytes.len() < 64 || &bytes[0..4] != b"\x7FELF" || bytes[5] != 1 {
+        return Ok(None);
+    }
+    match bytes[4] {
+        1 => read_elf_interp_phdr(&bytes, false),
+        2 => read_elf_interp_phdr(&bytes, true),
+        _ => Ok(None),
+    }
+}
+
+fn read_elf_interp_phdr(bytes: &[u8], is64: bool) -> Result<Option<String>> {
+    let (phoff, phentsize, phnum) = if is64 {
+        (
+            read_u64(bytes, 32)? as usize,
+            read_u16(bytes, 54)? as usize,
+            read_u16(bytes, 56)? as usize,
+        )
+    } else {
+        (
+            read_u32(bytes, 28)? as usize,
+            read_u16(bytes, 42)? as usize,
+            read_u16(bytes, 44)? as usize,
+        )
+    };
+
+    for i in 0..phnum {
+        let off = phoff + i * phentsize;
+        if read_u32(bytes, off)? != 3 {
+            continue;
+        }
+        let (p_offset, p_filesz) = if is64 {
+            (read_u64(bytes, off + 8)? as usize, read_u64(bytes, off + 32)? as usize)
+        } else {
+            (read_u32(bytes, off + 4)? as usize, read_u32(bytes, off + 16)? as usize)
+        };
+        let end = p_offset.saturating_add(p_filesz).min(bytes.len());
+        if p_offset >= bytes.len() {
+            return Ok(None);
+        }
+        let raw = &bytes[p_offset..end];
+        let nul = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        return String::from_utf8(raw[..nul].to_vec())
+            .map(Some)
+            .map_err(|e| DroidError::Workload(format!("bad ELF interp string: {e}")));
+    }
+    Ok(None)
+}
+
+fn read_u16(bytes: &[u8], off: usize) -> Result<u16> {
+    bytes.get(off..off + 2)
+        .map(|s| u16::from_le_bytes([s[0], s[1]]))
+        .ok_or_else(|| DroidError::Workload("truncated ELF".into()))
+}
+
+fn read_u32(bytes: &[u8], off: usize) -> Result<u32> {
+    bytes.get(off..off + 4)
+        .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+        .ok_or_else(|| DroidError::Workload("truncated ELF".into()))
+}
+
+fn read_u64(bytes: &[u8], off: usize) -> Result<u64> {
+    bytes.get(off..off + 8)
+        .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
+        .ok_or_else(|| DroidError::Workload("truncated ELF".into()))
 }
 
 #[cfg(test)]
