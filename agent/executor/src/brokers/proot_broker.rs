@@ -115,6 +115,14 @@ impl ProotBroker for ProotBrokerImpl {
         cmd.args(["-b", "/proc"]);
         cmd.args(["-b", "/sys"]);
 
+        // Bind host DNS config so containers can resolve names (needed for apk, curl, etc.).
+        // /etc/hosts gives localhost and the device hostname; resolv.conf gives nameservers.
+        for host_file in ["/etc/resolv.conf", "/etc/hosts"] {
+            if std::path::Path::new(host_file).exists() {
+                cmd.args(["-b", host_file]);
+            }
+        }
+
         // Additional mounts from the pod spec
         for mount in mounts {
             if !mount.source.exists() {
