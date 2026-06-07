@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use tokio::process::{Child, Command};
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::error::{DroidError, Result};
 use crate::models::Mount;
@@ -61,13 +61,21 @@ impl ProotBroker for ProotBrokerImpl {
 
         ensure_workload_command_exists(rootfs, command)?;
 
-        // Build the proot command: prepend the symlink-resolved ELF interpreter so
-        // proot execs the interpreter directly (it has no PT_INTERP itself).
-        // The interpreter then opens the program via its original guest path through
-        // proot's own path translation, which correctly handles rootfs symlinks.
-        // This bypasses the kernel's PT_INTERP loading (which looks in HOST /lib/)
-        // and avoids the "execve: No such file or directory" error on glibc hosts.
-        let proot_command = build_proot_command(rootfs, command);
+        // DEBUG: log rootfs key paths before invoking proot so we can diagnose
+        // symlink structure, missing files, and wrong architecture issues.
+        log_rootfs_debug(rootfs);
+
+        // DEBUG: bypass interpreter-prepend logic to test vanilla proot invocation.
+        // Goal: "proot -r <rootfs> -w / /bin/sh -c echo hello" must work first.
+        let proot_command = command.to_vec();
+
+        info!(
+            proot = %self.proot_path.display(),
+            rootfs = %rootfs.display(),
+            raw_command = ?command,
+            final_argv = ?proot_command,
+            "spawning proot"
+        );
 
         let mut cmd = Command::new(&self.proot_path);
 
@@ -75,7 +83,8 @@ impl ProotBroker for ProotBrokerImpl {
         // seccomp filters. Pure ptrace mode is slower but works everywhere.
         cmd.env("PROOT_NO_SECCOMP", "1");
         cmd.env("PROOT_TMP_DIR", &proot_tmp);
-        cmd.env("TMPDIR", &guest_tmp);
+        // TMPDIR must be the GUEST path (/tmp), not the host path — proot remaps it.
+        cmd.env("TMPDIR", "/tmp");
 
         // Root filesystem
         cmd.args(["-r", rootfs.to_str().unwrap_or("/")]);
@@ -129,6 +138,54 @@ impl ProotBroker for ProotBrokerImpl {
             .map_err(|e| DroidError::Process(format!("proot spawn failed: {e}")))?;
 
         Ok(child)
+    }
+}
+
+fn log_rootfs_debug(rootfs: &Path) {
+    // Log /bin and /lib directory contents
+    for dir in &["bin", "lib", "lib64"] {
+        match std::fs::read_dir(rootfs.join(dir)) {
+            Ok(entries) => {
+                let names: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect();
+                debug!(dir = %dir, entries = ?names, "rootfs dir");
+            }
+            Err(e) => debug!(dir = %dir, err = %e, "rootfs dir missing or unreadable"),
+        }
+    }
+
+    // Log key paths: existence, type, symlink target
+    let check = [
+        "bin/sh",
+        "bin/busybox",
+        "lib/ld-musl-aarch64.so.1",
+        "lib/libc.musl-aarch64.so.1",
+        "lib/ld-linux-aarch64.so.1",
+    ];
+    for rel in &check {
+        let host = rootfs.join(rel);
+        match std::fs::symlink_metadata(&host) {
+            Ok(meta) => {
+                let link_target = if meta.file_type().is_symlink() {
+                    std::fs::read_link(&host)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "<err>".into())
+                } else {
+                    String::new()
+                };
+                info!(
+                    path = %rel,
+                    is_file = meta.file_type().is_file(),
+                    is_symlink = meta.file_type().is_symlink(),
+                    size = meta.len(),
+                    link_target = %link_target,
+                    "rootfs path"
+                );
+            }
+            Err(_) => warn!(path = %rel, "rootfs path does not exist"),
+        }
     }
 }
 
