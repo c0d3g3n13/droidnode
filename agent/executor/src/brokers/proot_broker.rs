@@ -84,8 +84,8 @@ impl ProotBroker for ProotBrokerImpl {
         let loader = self.proot_path.with_file_name("libproot_loader.so");
         let loader_found = loader.exists();
         if loader_found {
+            // Termux proot does not accept a --loader CLI flag; use the env var instead.
             cmd.env("PROOT_LOADER", &loader);
-            cmd.arg(format!("--loader={}", loader.display()));
         } else {
             warn!(
                 loader = %loader.display(),
