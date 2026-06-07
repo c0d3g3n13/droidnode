@@ -70,6 +70,9 @@ impl ProotBroker for ProotBrokerImpl {
         cmd.env("PROOT_TMP_DIR", &proot_tmp);
         // TMPDIR must be the guest path (/tmp), not the host path — proot remaps it.
         cmd.env("TMPDIR", "/tmp");
+        // Default PATH for the guest — Android's inherited PATH only has /system/bin etc.
+        // Pod-specified env vars applied below will override this if the pod sets its own PATH.
+        cmd.env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
 
         // On Android, untrusted_app cannot execve files from code_cache/tmp
         // (dalvikcache_data_file type lacks `execute` SELinux permission on most vendor
