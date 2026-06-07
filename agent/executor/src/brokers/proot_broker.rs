@@ -61,17 +61,13 @@ impl ProotBroker for ProotBrokerImpl {
 
         ensure_workload_command_exists(rootfs, command)?;
 
-        // Replace any absolute symlinks in the interpreter chain with hard links.
-        // On non-musl hosts (Kali/glibc, Android) the kernel cannot follow absolute
-        // guest symlinks such as ld-musl-aarch64.so.1 → /lib/libc.musl-aarch64.so.1
-        // into the HOST namespace where those paths don't exist.
-        fix_interpreter_symlink(rootfs, command)?;
-
-        // Resolve the command's guest path to a concrete binary (e.g. /bin/sh →
-        // /bin/busybox) before passing it to proot. This avoids proot's internal
-        // loader having to chase the symlink against the host filesystem, which fails
-        // when the absolute symlink target does not exist on the host.
-        let resolved_command = resolve_command(rootfs, command);
+        // Build the proot command: prepend the symlink-resolved ELF interpreter so
+        // proot execs the interpreter directly (it has no PT_INTERP itself).
+        // The interpreter then opens the program via its original guest path through
+        // proot's own path translation, which correctly handles rootfs symlinks.
+        // This bypasses the kernel's PT_INTERP loading (which looks in HOST /lib/)
+        // and avoids the "execve: No such file or directory" error on glibc hosts.
+        let proot_command = build_proot_command(rootfs, command);
 
         let mut cmd = Command::new(&self.proot_path);
 
@@ -122,8 +118,7 @@ impl ProotBroker for ProotBrokerImpl {
             cmd.env(key, val);
         }
 
-        // Workload command (concrete path, symlinks resolved)
-        cmd.args(&resolved_command);
+        cmd.args(&proot_command);
 
         // Capture stdout/stderr for log streaming
         cmd.stdout(std::process::Stdio::piped());
@@ -183,75 +178,58 @@ fn ensure_workload_command_exists(rootfs: &Path, command: &[String]) -> Result<(
     }
 }
 
-// Resolve the first element of `command` to its concrete guest path by following
-// symlinks within the rootfs. Returns the original command unchanged on any error
-// so that proot can report a meaningful diagnostic rather than us silently failing.
-fn resolve_command(rootfs: &Path, command: &[String]) -> Vec<String> {
+// Build the command vector that proot will execute.
+//
+// For dynamically-linked ELF binaries the kernel loads PT_INTERP from the HOST
+// filesystem, where the guest interpreter (e.g. /lib/ld-musl-aarch64.so.1) does
+// not exist on Kali/glibc or Android. We avoid this entirely by prepending the
+// symlink-resolved interpreter guest path as the first argument. proot execs the
+// interpreter directly (it has no PT_INTERP itself), and from that point every
+// file access goes through proot's own path translation which correctly handles
+// rootfs-relative symlinks. The original program path is kept in argv so that
+// argv[0] inside the program is correct (e.g. busybox sees /bin/sh and runs as sh).
+fn build_proot_command(rootfs: &Path, command: &[String]) -> Vec<String> {
     let program = Path::new(&command[0]);
     if !program.is_absolute() {
         return command.to_vec();
     }
-    let Ok(resolved) = resolve_guest_path(rootfs, program) else {
-        return command.to_vec();
+
+    // Resolve command symlinks to find the concrete binary on the host so we can
+    // read its ELF. We do NOT use this resolved path in the command — the original
+    // path is kept so argv[0] is preserved for the running program.
+    let resolved_program = match resolve_guest_path(rootfs, program) {
+        Ok(p) => p,
+        Err(_) => return command.to_vec(),
     };
-    if resolved == program {
+    let host_program = guest_path_to_host(rootfs, &resolved_program);
+
+    // If no PT_INTERP (static binary or script), proot can exec it directly.
+    let interpreter = match read_elf_interpreter(&host_program) {
+        Ok(Some(i)) => i,
+        _ => return command.to_vec(),
+    };
+
+    // Resolve interpreter symlinks (e.g. ld-musl-aarch64.so.1 → libc.musl-aarch64.so.1)
+    // to get the concrete file. proot will exec this concrete path — no symlink for
+    // the kernel to chase into the host namespace.
+    let resolved_interp = match resolve_guest_path(rootfs, Path::new(&interpreter)) {
+        Ok(p) => p,
+        Err(_) => return command.to_vec(),
+    };
+    if !guest_path_to_host(rootfs, &resolved_interp).exists() {
         return command.to_vec();
     }
-    let mut out = Vec::with_capacity(command.len());
-    out.push(resolved.display().to_string());
-    out.extend_from_slice(&command[1..]);
+
+    let mut out = Vec::with_capacity(command.len() + 1);
+    out.push(resolved_interp.display().to_string()); // e.g. /lib/libc.musl-aarch64.so.1
+    out.extend_from_slice(command);                  // original: /bin/sh -c echo hello
+
     info!(
-        original = %program.display(),
-        resolved = %resolved.display(),
-        "resolved command symlink before proot exec"
+        program = %program.display(),
+        interpreter = %resolved_interp.display(),
+        "prepending ELF interpreter to proot command"
     );
     out
-}
-
-fn fix_interpreter_symlink(rootfs: &Path, command: &[String]) -> Result<()> {
-    let program = Path::new(&command[0]);
-    if !program.is_absolute() {
-        return Ok(());
-    }
-
-    let host_program = resolve_guest_path_to_host(rootfs, program)?;
-    let Some(interpreter) = read_elf_interpreter(&host_program)? else {
-        return Ok(());
-    };
-
-    let interp_host = guest_path_to_host(rootfs, Path::new(&interpreter));
-    let meta = match std::fs::symlink_metadata(&interp_host) {
-        Ok(m) => m,
-        Err(_) => return Ok(()),
-    };
-    if !meta.file_type().is_symlink() {
-        return Ok(()); // already a concrete file
-    }
-
-    let resolved_guest = resolve_guest_path(rootfs, Path::new(&interpreter))?;
-    let resolved_host = guest_path_to_host(rootfs, &resolved_guest);
-    if !resolved_host.exists() {
-        return Err(DroidError::Workload(format!(
-            "ELF interpreter {interpreter} resolved to {} which does not exist",
-            resolved_host.display()
-        )));
-    }
-
-    // Replace the absolute symlink with a hard link to the concrete binary.
-    // Hard link preferred (no extra disk space); fall back to copy if the
-    // filesystem doesn't support it (e.g. cross-device).
-    std::fs::remove_file(&interp_host)?;
-    if std::fs::hard_link(&resolved_host, &interp_host).is_err() {
-        std::fs::copy(&resolved_host, &interp_host)?;
-    }
-
-    info!(
-        interpreter = %interpreter,
-        resolved = %resolved_guest.display(),
-        "replaced absolute interpreter symlink with hard link for proot exec compatibility"
-    );
-
-    Ok(())
 }
 
 fn guest_path_to_host(rootfs: &Path, guest_path: &Path) -> PathBuf {
