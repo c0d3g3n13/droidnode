@@ -79,6 +79,20 @@ impl ProotBroker for ProotBrokerImpl {
         // TMPDIR must be the guest path (/tmp), not the host path — proot remaps it.
         cmd.env("TMPDIR", "/tmp");
 
+        // On Android, untrusted_app cannot execve files from code_cache (dalvikcache_data_file
+        // type) even though it can mmap them. proot's default loader extraction to PROOT_TMP_DIR
+        // therefore silently fails, causing proot to fall back to direct execve which fails for
+        // musl ELFs (no ld-musl on the Android host). We ship proot's loader binary as
+        // libproot_loader.so in jniLibs; nativeLibraryDir has nativelib_data_file type which
+        // untrusted_app CAN execve. Pass --loader so proot uses the pre-placed binary instead
+        // of trying to extract its embedded copy.
+        let loader = self.proot_path.with_file_name("libproot_loader.so");
+        if loader.exists() {
+            cmd.arg(format!("--loader={}", loader.display()));
+        } else {
+            warn!(loader = %loader.display(), "proot loader not found — container ELF execution may fail on Android");
+        }
+
         // Root filesystem
         cmd.args(["-r", rootfs.to_str().unwrap_or("/")]);
         cmd.args(["-w", "/"]);

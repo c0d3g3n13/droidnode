@@ -80,7 +80,7 @@ echo "✓ node-agent → $JNILIBS/libnode_agent.so"
 
 # ── proot ────────────────────────────────────────────────────────────────────
 
-if [ ! -f "$JNILIBS/libproot.so" ] || [ ! -f "$JNILIBS/libtalloc2.so" ]; then
+if [ ! -f "$JNILIBS/libproot.so" ] || [ ! -f "$JNILIBS/libtalloc2.so" ] || [ ! -f "$JNILIBS/libproot_loader.so" ]; then
     echo ""
     echo "Downloading proot + libtalloc for Android ARM64..."
 
@@ -96,6 +96,18 @@ if [ ! -f "$JNILIBS/libproot.so" ] || [ ! -f "$JNILIBS/libtalloc2.so" ]; then
     dpkg -x "$WORK/proot.deb" "$WORK/proot-pkg"
     PROOT_BIN=$(find "$WORK/proot-pkg" -type f -name "proot" | head -1)
 
+    # Termux ships the ELF loader separately at usr/lib/proot/loader.
+    # We ship it as libproot_loader.so so it lands in nativeLibraryDir, which has
+    # nativelib_data_file SELinux type — exec-able by untrusted_app processes.
+    # code_cache/tmp has dalvikcache_data_file type; on most Android 10+ devices
+    # untrusted_app lacks the execute (not execmod) SELinux permission for that type,
+    # so proot's own loader extraction there silently fails.
+    PROOT_LOADER_BIN=$(find "$WORK/proot-pkg" -path "*/lib/proot/loader" ! -name "loader32" | head -1)
+    if [ -z "$PROOT_LOADER_BIN" ]; then
+        echo "ERROR: proot loader binary not found in package (expected usr/lib/proot/loader)"
+        exit 1
+    fi
+
     # Download matching libtalloc
     wget -q --show-progress \
         "https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.3_aarch64.deb" \
@@ -109,8 +121,9 @@ if [ ! -f "$JNILIBS/libproot.so" ] || [ ! -f "$JNILIBS/libtalloc2.so" ]; then
     patchelf --replace-needed libtalloc.so.2 libtalloc2.so "$WORK/proot-patched"
     patchelf --set-rpath '$ORIGIN' "$WORK/proot-patched"
 
-    cp "$WORK/proot-patched" "$JNILIBS/libproot.so"
-    cp "$TALLOC_LIB"         "$JNILIBS/libtalloc2.so"
+    cp "$WORK/proot-patched"   "$JNILIBS/libproot.so"
+    cp "$TALLOC_LIB"           "$JNILIBS/libtalloc2.so"
+    cp "$PROOT_LOADER_BIN"     "$JNILIBS/libproot_loader.so"
     rm -rf "$WORK"
 
     # Verify the NEEDED entry was actually renamed
@@ -118,7 +131,7 @@ if [ ! -f "$JNILIBS/libproot.so" ] || [ ! -f "$JNILIBS/libtalloc2.so" ]; then
         echo "ERROR: patchelf did not rename the NEEDED entry — libproot.so still requires libtalloc.so.2"
         exit 1
     fi
-    echo "✓ libproot.so + libtalloc2.so → $JNILIBS/"
+    echo "✓ libproot.so + libtalloc2.so + libproot_loader.so → $JNILIBS/"
 fi
 
 # ── Build APK ────────────────────────────────────────────────────────────────

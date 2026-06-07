@@ -6,18 +6,18 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use executor::{
-    brokers::{
-        ControlPlaneBrokerImpl, FilesystemBrokerImpl, OciRegistryBrokerImpl, ProotBrokerImpl,
-    },
+    brokers::{ProotBroker, ControlPlaneBrokerImpl, FilesystemBrokerImpl, OciRegistryBrokerImpl, ProotBrokerImpl},
     exposers::VirtualKubeletExposer,
+    models::ImageRef,
     services::{
         foundation::{
             EventRecordingServiceImpl, HealthProbeServiceImpl, ImagePullServiceImpl,
             ImageUnpackServiceImpl, NodeCapabilityServiceImpl, WorkloadExecutionServiceImpl,
         },
         orchestration::{
-            ImageOrchestrationServiceImpl, NodeRegistrationService, NodeRegistrationServiceImpl,
-            ReconciliationService, ReconciliationServiceImpl, WorkloadLifecycleServiceImpl,
+            ImageOrchestrationService, ImageOrchestrationServiceImpl, NodeRegistrationService,
+            NodeRegistrationServiceImpl, ReconciliationService, ReconciliationServiceImpl,
+            WorkloadLifecycleServiceImpl,
         },
     },
 };
@@ -121,6 +121,16 @@ async fn main() -> anyhow::Result<()> {
             as Arc<dyn executor::services::foundation::NodeCapabilityService>,
     ));
 
+    // ─── Proot smoke test (independent of Kubernetes) ────────────────────────
+    // Runs at startup in the background; logs PASSED/FAILED so we know immediately
+    // whether proot can actually run musl ELFs before any pod is scheduled.
+
+    tokio::spawn({
+        let proot = Arc::clone(&proot_broker) as Arc<dyn ProotBroker>;
+        let orch  = Arc::clone(&image_orch)  as Arc<dyn ImageOrchestrationService>;
+        async move { proot_smoke_test(proot, orch).await }
+    });
+
     // ─── Launch all tasks ────────────────────────────────────────────────────
 
     let reg_handle = {
@@ -214,6 +224,54 @@ impl Config {
             rootfs_base,
             kubelet_addr,
         }
+    }
+}
+
+// ─── Proot smoke test ─────────────────────────────────────────────────────────
+
+async fn proot_smoke_test(
+    proot: Arc<dyn ProotBroker>,
+    image_orch: Arc<dyn ImageOrchestrationService>,
+) {
+    info!("proot smoke test: starting");
+
+    let image_ref = match ImageRef::parse("alpine:latest") {
+        Ok(r) => r,
+        Err(e) => { error!(error = %e, "proot smoke test: bad image ref"); return; }
+    };
+
+    let rootfs = match image_orch.prepare_image(&image_ref).await {
+        Ok(r) => r,
+        Err(e) => { error!(error = %e, "proot smoke test: failed to prepare Alpine rootfs"); return; }
+    };
+
+    let cmd = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "echo proot-smoke-ok; uname -m".to_string(),
+    ];
+
+    let child = match proot.execute(&rootfs, &cmd, &[], &[]).await {
+        Ok(c) => c,
+        Err(e) => { error!(error = %e, "proot smoke test: failed to spawn proot"); return; }
+    };
+
+    match child.wait_with_output().await {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if out.status.success() && stdout.contains("proot-smoke-ok") {
+                info!(stdout = %stdout.trim(), "proot smoke test PASSED — proot + musl ELF execution working");
+            } else {
+                error!(
+                    exit_code = ?out.status.code(),
+                    stdout = %stdout.trim(),
+                    stderr = %stderr.trim(),
+                    "proot smoke test FAILED"
+                );
+            }
+        }
+        Err(e) => error!(error = %e, "proot smoke test: wait_with_output failed"),
     }
 }
 
