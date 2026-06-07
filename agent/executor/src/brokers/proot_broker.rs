@@ -50,22 +50,35 @@ impl ProotBroker for ProotBrokerImpl {
 
         let guest_tmp = rootfs.join("tmp");
         tokio::fs::create_dir_all(&guest_tmp).await?;
+
+        // proot's own temp dir must be OUTSIDE the rootfs. If it were inside, proot
+        // would translate its own loader path through guest remapping and fail to exec it.
+        let proot_tmp = rootfs
+            .parent()
+            .unwrap_or(rootfs)
+            .join(".proot_tmp");
+        tokio::fs::create_dir_all(&proot_tmp).await?;
+
         ensure_workload_command_exists(rootfs, command)?;
 
-        // Alpine (and other musl images) ship the ELF interpreter as an absolute symlink:
-        //   <rootfs>/lib/ld-musl-aarch64.so.1 -> /lib/libc.musl-aarch64.so.1
-        // When proot hands that symlink path to execve, the kernel follows the absolute
-        // target in the HOST namespace where it doesn't exist → ENOENT.
-        // Fix: replace the symlink with a hard link to the concrete file so the kernel
-        // execs the real binary directly, with no cross-namespace symlink chasing.
+        // Replace any absolute symlinks in the interpreter chain with hard links.
+        // On non-musl hosts (Kali/glibc, Android) the kernel cannot follow absolute
+        // guest symlinks such as ld-musl-aarch64.so.1 → /lib/libc.musl-aarch64.so.1
+        // into the HOST namespace where those paths don't exist.
         fix_interpreter_symlink(rootfs, command)?;
+
+        // Resolve the command's guest path to a concrete binary (e.g. /bin/sh →
+        // /bin/busybox) before passing it to proot. This avoids proot's internal
+        // loader having to chase the symlink against the host filesystem, which fails
+        // when the absolute symlink target does not exist on the host.
+        let resolved_command = resolve_command(rootfs, command);
 
         let mut cmd = Command::new(&self.proot_path);
 
         // Disable proot's seccomp acceleration — conflicts with host and Android kernel
         // seccomp filters. Pure ptrace mode is slower but works everywhere.
         cmd.env("PROOT_NO_SECCOMP", "1");
-        cmd.env("PROOT_TMP_DIR", &guest_tmp);
+        cmd.env("PROOT_TMP_DIR", &proot_tmp);
         cmd.env("TMPDIR", &guest_tmp);
 
         // Root filesystem
@@ -109,8 +122,8 @@ impl ProotBroker for ProotBrokerImpl {
             cmd.env(key, val);
         }
 
-        // Workload command
-        cmd.args(command);
+        // Workload command (concrete path, symlinks resolved)
+        cmd.args(&resolved_command);
 
         // Capture stdout/stderr for log streaming
         cmd.stdout(std::process::Stdio::piped());
@@ -168,6 +181,31 @@ fn ensure_workload_command_exists(rootfs: &Path, command: &[String]) -> Result<(
             )))
         }
     }
+}
+
+// Resolve the first element of `command` to its concrete guest path by following
+// symlinks within the rootfs. Returns the original command unchanged on any error
+// so that proot can report a meaningful diagnostic rather than us silently failing.
+fn resolve_command(rootfs: &Path, command: &[String]) -> Vec<String> {
+    let program = Path::new(&command[0]);
+    if !program.is_absolute() {
+        return command.to_vec();
+    }
+    let Ok(resolved) = resolve_guest_path(rootfs, program) else {
+        return command.to_vec();
+    };
+    if resolved == program {
+        return command.to_vec();
+    }
+    let mut out = Vec::with_capacity(command.len());
+    out.push(resolved.display().to_string());
+    out.extend_from_slice(&command[1..]);
+    info!(
+        original = %program.display(),
+        resolved = %resolved.display(),
+        "resolved command symlink before proot exec"
+    );
+    out
 }
 
 fn fix_interpreter_symlink(rootfs: &Path, command: &[String]) -> Result<()> {
