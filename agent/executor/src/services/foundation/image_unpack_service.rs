@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tar::Archive;
-use tracing::{debug, info, instrument};
+use tar::{Archive, EntryType};
+use tracing::{debug, info, instrument, warn};
 
 use crate::brokers::FilesystemBroker;
 use crate::error::Result;
@@ -62,10 +62,22 @@ fn extract_layer(tar_path: &Path, target: &Path) -> Result<()> {
     archive.set_preserve_permissions(true);
     archive.set_overwrite(true);
 
+    // Hardlinks whose link target hadn't been extracted yet when first encountered.
+    // Resolved by copy in a second pass after the full archive is read.
+    let mut deferred_hardlinks: Vec<(PathBuf, PathBuf)> = Vec::new();
+
     for entry_result in archive.entries()? {
         let mut entry = entry_result?;
         let entry_path = entry.path()?.into_owned();
         let entry_name = entry_path.to_string_lossy();
+        let entry_type = entry.header().entry_type();
+
+        // Read link name from header before consuming the entry (hardlinks only).
+        let link_name: Option<PathBuf> = if entry_type == EntryType::Link {
+            entry.link_name().ok().flatten().map(|p| p.into_owned())
+        } else {
+            None
+        };
 
         // Handle OCI whiteout files
         if let Some(file_name) = entry_path.file_name() {
@@ -100,8 +112,62 @@ fn extract_layer(tar_path: &Path, target: &Path) -> Result<()> {
         }
 
         debug!(path = %entry_name, "extracting entry");
-        entry.unpack_in(target)?;
+
+        match entry.unpack_in(target) {
+            Ok(_) => {}
+            Err(_) if entry_type == EntryType::Link => {
+                // Hardlink creation can fail on Android (protected_hardlinks kernel
+                // setting, or the link target appears later in the stream). Fall back
+                // to a file copy; defer if the source isn't extracted yet.
+                if let Some(src_rel) = &link_name {
+                    let src = target.join(src_rel);
+                    let dst = target.join(&entry_path);
+                    if src.exists() {
+                        hardlink_copy(&src, &dst)?;
+                    } else {
+                        deferred_hardlinks.push((src_rel.clone(), entry_path.clone()));
+                    }
+                } else {
+                    return Err(crate::error::DroidError::Filesystem(format!(
+                        "failed to unpack `{}`",
+                        target.join(&entry_path).display()
+                    )));
+                }
+            }
+            Err(_) => {
+                return Err(crate::error::DroidError::Filesystem(format!(
+                    "failed to unpack `{}`",
+                    target.join(&entry_path).display()
+                )));
+            }
+        }
     }
 
+    // Second pass: resolve deferred hardlinks whose target appeared later in the stream.
+    for (src_rel, dst_rel) in &deferred_hardlinks {
+        let src = target.join(src_rel);
+        let dst = target.join(dst_rel);
+        if src.exists() {
+            warn!(src = %src.display(), dst = %dst.display(), "resolving deferred hardlink via copy");
+            hardlink_copy(&src, &dst)?;
+        } else {
+            return Err(crate::error::DroidError::Filesystem(format!(
+                "failed to unpack `{}` (hardlink target `{}` not found)",
+                dst.display(),
+                src.display()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn hardlink_copy(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src, dst).map_err(|_| {
+        crate::error::DroidError::Filesystem(format!("failed to unpack `{}`", dst.display()))
+    })?;
     Ok(())
 }
