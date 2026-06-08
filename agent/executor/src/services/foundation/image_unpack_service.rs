@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tar::{Archive, EntryType};
@@ -28,7 +29,6 @@ impl ImageUnpackServiceImpl {
     pub fn new(fs_broker: Arc<dyn FilesystemBroker>) -> Self {
         Self { fs_broker }
     }
-
 }
 
 #[async_trait]
@@ -52,6 +52,10 @@ impl ImageUnpackService for ImageUnpackServiceImpl {
 }
 
 // ─── Synchronous extraction (runs on blocking thread) ────────────────────────
+
+fn other_err(msg: String) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, msg)
+}
 
 fn extract_layer(tar_path: &Path, target: &Path) -> Result<()> {
     let f = std::fs::File::open(tar_path)?;
@@ -128,17 +132,19 @@ fn extract_layer(tar_path: &Path, target: &Path) -> Result<()> {
                         deferred_hardlinks.push((src_rel.clone(), entry_path.clone()));
                     }
                 } else {
-                    return Err(crate::error::DroidError::Filesystem(format!(
+                    return Err(other_err(format!(
                         "failed to unpack `{}`",
                         target.join(&entry_path).display()
-                    )));
+                    ))
+                    .into());
                 }
             }
             Err(_) => {
-                return Err(crate::error::DroidError::Filesystem(format!(
+                return Err(other_err(format!(
                     "failed to unpack `{}`",
                     target.join(&entry_path).display()
-                )));
+                ))
+                .into());
             }
         }
     }
@@ -151,11 +157,12 @@ fn extract_layer(tar_path: &Path, target: &Path) -> Result<()> {
             warn!(src = %src.display(), dst = %dst.display(), "resolving deferred hardlink via copy");
             hardlink_copy(&src, &dst)?;
         } else {
-            return Err(crate::error::DroidError::Filesystem(format!(
+            return Err(other_err(format!(
                 "failed to unpack `{}` (hardlink target `{}` not found)",
                 dst.display(),
                 src.display()
-            )));
+            ))
+            .into());
         }
     }
 
@@ -166,8 +173,12 @@ fn hardlink_copy(src: &Path, dst: &Path) -> Result<()> {
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::copy(src, dst).map_err(|_| {
-        crate::error::DroidError::Filesystem(format!("failed to unpack `{}`", dst.display()))
+    std::fs::copy(src, dst).map_err(|e| {
+        other_err(format!(
+            "failed to copy hardlink `{}` -> `{}`: {e}",
+            src.display(),
+            dst.display()
+        ))
     })?;
     Ok(())
 }
