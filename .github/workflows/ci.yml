@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  # ── Rust: check + clippy + test (host target, fast) ────────────────────────
+  rust:
+    name: Rust check / clippy / test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agent/target
+          key: rust-${{ hashFiles('agent/**/Cargo.lock') }}
+          restore-keys: rust-
+
+      - name: cargo check
+        run: cargo check --workspace
+
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  # ── Rust: cross-compile check for aarch64-linux-android ───────────────────
+  rust-android:
+    name: Rust cross-compile (aarch64-android)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable + Android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            agent/target
+          key: rust-android-${{ hashFiles('agent/**/Cargo.lock') }}
+          restore-keys: rust-android-
+
+      - name: Install Android NDK r27c
+        id: ndk
+        run: |
+          NDK_URL="https://dl.google.com/android/repository/android-ndk-r27c-linux.zip"
+          NDK_DIR="$HOME/android-ndk-r27c"
+          if [ ! -d "$NDK_DIR" ]; then
+            wget -q "$NDK_URL" -O /tmp/ndk.zip
+            unzip -q /tmp/ndk.zip -d "$HOME"
+            rm /tmp/ndk.zip
+          fi
+          echo "ndk_home=$NDK_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: cargo check (aarch64-linux-android)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk_home }}
+          TOOLCHAIN: ${{ steps.ndk.outputs.ndk_home }}/toolchains/llvm/prebuilt/linux-x86_64/bin
+        run: |
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android35-clang" \
+          CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android35-clang" \
+          CXX_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android35-clang++" \
+          AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar" \
+          cargo check --workspace --target aarch64-linux-android
+
+  # ── Android: Kotlin compile check ─────────────────────────────────────────
+  android:
+    name: Android Kotlin compile
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle.properties') }}
+          restore-keys: gradle-
+
+      - name: Create stub jniLibs so Gradle doesn't error on missing .so files
+        run: |
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          for lib in libnode_agent.so libproot.so libtalloc2.so libproot_loader.so; do
+            touch android/app/src/main/jniLibs/arm64-v8a/$lib
+          done
+
+      - name: Gradle compile (no APK packaging)
+        working-directory: android
+        run: ./gradlew compileDebugKotlin --no-daemon
