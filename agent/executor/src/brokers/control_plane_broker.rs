@@ -49,15 +49,17 @@ impl ControlPlaneBrokerImpl {
         let memory_str = format!("{}", profile.memory.total_bytes);
         let cpu_str = format!("{}", profile.cpu.cores);
 
-        let mut node = Node::default();
-        node.metadata = ObjectMeta {
-            name: Some(self.node_name.clone()),
-            labels: Some([
-                ("kubernetes.io/hostname".into(), self.node_name.clone()),
-                ("kubernetes.io/arch".into(), profile.cpu.arch.clone()),
-                ("kubernetes.io/os".into(), "linux".into()),
-                ("droidnode/managed".into(), "true".into()),
-            ].into()),
+        let node = Node {
+            metadata: ObjectMeta {
+                name: Some(self.node_name.clone()),
+                labels: Some([
+                    ("kubernetes.io/hostname".into(), self.node_name.clone()),
+                    ("kubernetes.io/arch".into(), profile.cpu.arch.clone()),
+                    ("kubernetes.io/os".into(), "linux".into()),
+                    ("droidnode/managed".into(), "true".into()),
+                ].into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 

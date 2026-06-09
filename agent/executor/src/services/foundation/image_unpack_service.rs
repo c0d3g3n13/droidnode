@@ -54,7 +54,7 @@ impl ImageUnpackService for ImageUnpackServiceImpl {
 // ─── Synchronous extraction (runs on blocking thread) ────────────────────────
 
 fn other_err(msg: String) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, msg)
+    io::Error::other(msg)
 }
 
 fn extract_layer(tar_path: &Path, target: &Path) -> Result<()> {

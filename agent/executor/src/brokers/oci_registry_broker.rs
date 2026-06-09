@@ -22,6 +22,12 @@ pub struct OciRegistryBrokerImpl {
     client: Client,
 }
 
+impl Default for OciRegistryBrokerImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OciRegistryBrokerImpl {
     pub fn new() -> Self {
         Self {
@@ -119,7 +125,7 @@ impl OciRegistryBrokerImpl {
     }
 }
 
-fn extract_challenge_param<'a>(header: &'a str, key: &str) -> Option<String> {
+fn extract_challenge_param(header: &str, key: &str) -> Option<String> {
     // Format: Bearer realm="...",service="...",scope="..."
     let search = format!("{key}=\"");
     let start = header.find(&search)? + search.len();

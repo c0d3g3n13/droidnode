@@ -25,6 +25,12 @@ pub struct KubeletState {
     pub pod_statuses: Arc<RwLock<HashMap<String, PodRunStatus>>>,
 }
 
+impl Default for KubeletState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KubeletState {
     pub fn new() -> Self {
         Self {
