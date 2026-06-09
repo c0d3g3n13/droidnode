@@ -164,6 +164,35 @@ adb push /tmp/droidnode-kubeconfig \
 
 Launch the DroidNode app and tap **Start Agent**. The node appears in `kubectl get nodes` within ~30 seconds.
 
+### Environment variables (agent)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KUBECONFIG` | — | Path to kubeconfig (required) |
+| `DROIDNODE_NODE_ID` | `droidnode-<hostname>` | Node name as it appears in kubectl |
+| `DROIDNODE_PROOT_PATH` | `~/.droidnode/proot` | Path to proot binary |
+| `DROIDNODE_LAYERS_DIR` | `~/.droidnode/layers` | OCI layer tarball cache |
+| `DROIDNODE_ROOTFS_DIR` | `~/.droidnode/rootfs` | Merged container rootfs trees |
+| `DROIDNODE_KUBELET_PORT` | `10250` | Port for the virtual kubelet HTTPS server |
+| `RUST_LOG` | — | Tracing filter — e.g. `info`, `debug` |
+
+> **Note:** k3s runs its own kubelet on port 10250. Use `DROIDNODE_KUBELET_PORT=10255` when running alongside k3s on the same machine.
+
+### Running locally (Linux / WSL2)
+
+```bash
+mkdir -p /tmp/droidnode/{layers,rootfs}
+
+KUBECONFIG=~/.kube/config \
+DROIDNODE_NODE_ID=droidnode-dev \
+DROIDNODE_PROOT_PATH=/usr/bin/proot \
+DROIDNODE_LAYERS_DIR=/tmp/droidnode/layers \
+DROIDNODE_ROOTFS_DIR=/tmp/droidnode/rootfs \
+DROIDNODE_KUBELET_PORT=10255 \
+RUST_LOG=info \
+cargo run -p node-agent
+```
+
 ---
 
 ## Usage
