@@ -102,6 +102,7 @@ impl WorkloadLifecycleService for WorkloadLifecycleServiceImpl {
         }
 
         info!(pod = %pod_name, "workload started");
+        eprintln!("POD_EVENT started pod={pod_name}");
 
         Ok(Arc::new(RunningWorkload {
             pod_uid,

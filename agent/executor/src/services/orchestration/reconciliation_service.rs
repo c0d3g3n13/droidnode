@@ -114,6 +114,8 @@ impl ReconciliationServiceImpl {
                 image = %image_name,
                 "new pod assigned — preparing image"
             );
+            let pod_name_str = pod.metadata.name.as_deref().unwrap_or("?");
+            eprintln!("POD_EVENT assigned pod={pod_name_str} image={image_name}");
 
             let image_ref = match crate::models::ImageRef::parse(&image_name) {
                 Ok(r) => r,
@@ -127,6 +129,7 @@ impl ReconciliationServiceImpl {
                 Ok(p) => p,
                 Err(e) => {
                     error!(pod = ?pod.metadata.name, error = %e, "image preparation failed");
+                    eprintln!("POD_EVENT failed pod={pod_name_str} reason=ImagePullFailed");
                     let _ = self
                         .event_service
                         .record_warning("ImagePullFailed", &e.to_string(), pod.metadata.uid.clone())
@@ -177,6 +180,7 @@ impl ReconciliationServiceImpl {
             let status = self.workload_lifecycle.status(workload).await?;
             if status.phase == PodPhase::Failed || status.phase == PodPhase::Succeeded {
                 info!(pod = %workload.pod_name, phase = ?status.phase, "workload finished");
+                eprintln!("POD_EVENT finished pod={} phase={:?}", workload.pod_name, status.phase);
                 to_restart.push(uid.clone());
             }
             self.cp_broker

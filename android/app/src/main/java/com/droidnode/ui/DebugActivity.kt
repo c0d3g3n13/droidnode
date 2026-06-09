@@ -207,10 +207,10 @@ class DebugActivity : Activity() {
 
         val pods = LinkedHashMap<String, PodInfo>()
 
-        val reAssign   = Regex("""pod=Some\("([^"]+)"\).*image=(\S+)""")
-        val reStarted  = Regex("""workload started pod=(\S+)""")
-        val reFinished = Regex("""workload finished pod=(\S+) phase=(\S+)""")
-        val reFailed   = Regex("""image preparation failed pod=Some\("([^"]+)"\)""")
+        val reAssign   = Regex("""POD_EVENT assigned pod=(\S+) image=(\S+)""")
+        val reStarted  = Regex("""POD_EVENT started pod=(\S+)""")
+        val reFinished = Regex("""POD_EVENT finished pod=(\S+) phase=(\S+)""")
+        val reFailed   = Regex("""POD_EVENT failed pod=(\S+)""")
 
         for (line in lines) {
             reAssign.find(line.text)?.let {
