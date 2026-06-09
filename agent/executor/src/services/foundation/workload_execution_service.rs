@@ -129,14 +129,23 @@ impl WorkloadExecutionService for WorkloadExecutionServiceImpl {
         let env = Self::resolve_env(containers, image_config.as_ref());
         let mounts = Self::resolve_mounts(containers);
 
+        // Working directory: pod spec → image WORKDIR → default "/"
+        let cwd_owned = containers
+            .working_dir
+            .clone()
+            .or_else(|| image_config.as_ref().and_then(|c| c.working_dir.clone()))
+            .filter(|s| !s.is_empty());
+        let cwd = cwd_owned.as_deref();
+
         info!(
             pod = pod.metadata.name.as_deref().unwrap_or("?"),
             command = ?command,
+            cwd = cwd.unwrap_or("/"),
             "executing workload"
         );
 
         self.proot_broker
-            .execute(rootfs_path, &command, &env, &mounts)
+            .execute(rootfs_path, &command, &env, &mounts, cwd)
             .await
     }
 }

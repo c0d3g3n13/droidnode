@@ -78,7 +78,7 @@ impl HealthProbeServiceImpl {
 
         let mut child = self
             .proot_broker
-            .execute(rootfs, command, &[], &[])
+            .execute(rootfs, command, &[], &[], None)
             .await?;
 
         let status = child

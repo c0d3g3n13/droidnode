@@ -16,6 +16,7 @@ pub trait ProotBroker: Send + Sync {
         command: &[String],
         env: &[(String, String)],
         mounts: &[Mount],
+        cwd: Option<&str>,
     ) -> Result<Child>;
 }
 
@@ -43,6 +44,7 @@ impl ProotBroker for ProotBrokerImpl {
         command: &[String],
         env: &[(String, String)],
         mounts: &[Mount],
+        cwd: Option<&str>,
     ) -> Result<Child> {
         if command.is_empty() {
             return Err(DroidError::Process("command is empty".into()));
@@ -108,7 +110,7 @@ impl ProotBroker for ProotBrokerImpl {
 
         // Root filesystem
         cmd.args(["-r", rootfs.to_str().unwrap_or("/")]);
-        cmd.args(["-w", "/"]);
+        cmd.args(["-w", cwd.unwrap_or("/")]);
 
         // Default Linux pseudo-filesystems
         cmd.args(["-b", "/dev"]);
@@ -257,7 +259,7 @@ mod tests {
             "-c".to_string(),
             "echo hello from proot".to_string(),
         ];
-        let child = broker.execute(&rootfs, &cmd, &[], &[]).await.unwrap();
+        let child = broker.execute(&rootfs, &cmd, &[], &[], None).await.unwrap();
 
         let output = child.wait_with_output().await.unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);

@@ -251,7 +251,7 @@ async fn proot_smoke_test(
         "echo proot-smoke-ok; uname -m".to_string(),
     ];
 
-    let child = match proot.execute(&rootfs, &cmd, &[], &[]).await {
+    let child = match proot.execute(&rootfs, &cmd, &[], &[], None).await {
         Ok(c) => c,
         Err(e) => { error!(error = %e, "proot smoke test: failed to spawn proot"); return; }
     };
