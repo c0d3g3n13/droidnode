@@ -75,8 +75,9 @@ android/
 
 ## Prerequisites
 
-| Tool | Version | Notes |
-|------|---------|-------|
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| Android device | — | **Developer mode + USB debugging enabled** (Settings → About phone → tap Build number 7×) |
 | Rust + Cargo | stable | `rustup target add aarch64-linux-android` |
 | Android NDK | r27c+ | Set `ANDROID_NDK_HOME` or let the script download it |
 | Android SDK | API 26+ | Android Studio or `sdkmanager` |
