@@ -3,6 +3,7 @@ package com.droidnode.exposers
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
@@ -14,6 +15,7 @@ import com.droidnode.brokers.WakeLockBroker
 import com.droidnode.services.foundation.AgentLifecycleService
 import com.droidnode.services.foundation.ResourceGuardService
 import com.droidnode.services.orchestration.NodeReadinessService
+import com.droidnode.ui.DebugActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,6 +34,12 @@ private const val CHANNEL_ID = "droidnode_channel"
  * All execution logic lives in the Rust agent.
  */
 class ForegroundServiceExposer : Service() {
+
+    companion object {
+        @Volatile var isAgentRunning: Boolean = false
+        @Volatile var nodeId: String = ""
+        @Volatile var startTime: Long = 0L
+    }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -79,9 +87,15 @@ class ForegroundServiceExposer : Service() {
             nodeId = nodeId,
         )
 
+        // Expose node ID globally for DebugActivity
+        ForegroundServiceExposer.nodeId = nodeId
+
         // ─── Services ───────────────────────────────────────────────────────
 
-        val agentLifecycle = AgentLifecycleService(processBroker)
+        val agentLifecycle = AgentLifecycleService(processBroker) { running ->
+            isAgentRunning = running
+            if (running) startTime = System.currentTimeMillis()
+        }
         val resourceGuard = ResourceGuardService(batteryBroker, networkBroker)
         nodeReadinessService = NodeReadinessService(agentLifecycle, resourceGuard)
     }
@@ -122,13 +136,22 @@ class ForegroundServiceExposer : Service() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
-    private fun buildNotification(): Notification =
-        Notification.Builder(this, CHANNEL_ID)
+    private fun buildNotification(): Notification {
+        val tapIntent = Intent(this, DebugActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val tapPending = PendingIntent.getActivity(
+            this, 0, tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("DroidNode")
-            .setContentText("Compute node active")
+            .setContentText("Compute node active — tap to debug")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentIntent(tapPending)
             .setOngoing(true)
             .build()
+    }
 
     private fun deviceFingerprint(): String {
         return android.provider.Settings.Secure.getString(

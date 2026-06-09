@@ -37,5 +37,10 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ui.DebugActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.NoTitleBar"/>
+
     </application>
 </manifest>
