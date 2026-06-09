@@ -1,0 +1,14 @@
+# Claude Code local config
+.claude/
+
+# Rust
+agent/target/
+
+# Android build
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+
+# Misc
+*.DS_Store
